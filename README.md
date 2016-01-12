@@ -2,9 +2,9 @@
 
 Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU in Spring 2016.
 
-* Course website: http://brickisland.net/DDGSpring2016/
-* Instructor: [Keenan Crane](keenan.is/here)
-* TA: [Nick Sharp](nmwsharp.com) (direct questions about this code to me, my email is on the course website)
+* Course website: https://www.brickisland.net/DDGSpring2016/
+* Instructor: [Keenan Crane](http://www.keenan.is/here)
+* TA: [Nick Sharp](http://www.nmwsharp.com) (direct questions about this code to me, my email is on the course website)
 
 ##Getting started
 
