@@ -10,7 +10,7 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
 
 1. Make sure you have an installation of Python 2.7, including the `pip` package manager.
   * **Mac** On recent OSX versions, Python is installed by default. Executing `sudo easy_install pip` in a terminal should install `pip`.
-  * **Windows** [Anaconda](https://www.continuum.io/downloads) provides a convenient installer which includes Python, `pip`, and many popular scientific packages for Python. (**Note:** it might be a little more complex than this)
+  * **Windows** You can download a Python 2.7 installer from [python.org](https://www.python.org/downloads/release/python-2711/). Section 3.3 of the [Python documentation](https://docs.python.org/2/using/windows.html) provides guidance for ensuring that you can execute Python programs from the command line. Installing the newest version of Python should get you `pip` automatically, but if you don't have it check out the instructions [here](https://pip.pypa.io/en/stable/installing/).
   * **Linux** Get Python and `pip` from your package manager, if you don't already have them. On Ubuntu, try `sudo apt-get install python-pip`.
 
 2. Install dependencies using `pip`. Execute these commands at the terminal or command line.
