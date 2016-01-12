@@ -4,10 +4,11 @@
 import sys, os
 
 ## Imports from this project
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'core'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'core')) # hack to allow local imports without creaing a module or modifying the path variable
 from InputOutput import *
 from MeshDisplay import MeshDisplay
 from HalfEdgeMesh import *
+
 
 def main():
 
@@ -16,13 +17,13 @@ def main():
     if(len(sys.argv) > 1):
         filename = sys.argv[1]
     else:
-        print("ERROR: No file name specified. Proper syntax is 'python meshview.py path/to/your/mesh.obj'.")
+        print("ERROR: No file name specified. Proper syntax is 'python testview.py path/to/your/mesh.obj'.")
         exit()
 
     # Read in the mesh
     mesh = HalfEdgeMesh(readMesh(filename))
 
-    # Toss up a viewer window
+    # Create a viewer window
     winName = 'meshview -- ' + os.path.basename(filename)
     meshDisplay = MeshDisplay(windowTitle=winName)
     meshDisplay.setMesh(mesh)
