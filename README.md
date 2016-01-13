@@ -48,7 +48,7 @@ Clearly, the code for this class is written in Python. Pure Python code is typic
 
 If you are unfamiliar with Python, don't be afraid! We will be doing everything possible to make this a painless experience. You might want to devote some time to basic tutorials on Python, but hopefully that will not be necessary. In this class you won't necessarily be creating complex programs from scratch -- just implementing algorithms.
 
-The [github wiki](https://github.com/nmwsharp/DDGSpring2016/wiki) contains (or will contain) some notes about Python as well as a series of examples demonstrating the usage of the language and this library.
+The [wiki](https://github.com/nmwsharp/DDGSpring2016/wiki) for this repository contains (or will contain) some notes about Python as well as a series of examples demonstrating the usage of the language and this library.
 
 
 ##Codebase Outline
