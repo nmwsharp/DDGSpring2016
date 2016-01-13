@@ -6,15 +6,15 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
 * Instructor: [Keenan Crane](http://www.keenan.is/here)
 * TA: [Nick Sharp](http://www.nmwsharp.com) (direct questions about this code to me, my email is on the course website)
 
-##Getting started
+##Getting started (OSX and Linux)
 
 1. Make sure you have an installation of Python 2.7, including the `pip` package manager.
   * **Mac** On recent OSX versions, Python is installed by default. Executing `sudo easy_install pip` in a terminal should install `pip`.
-  * **Windows** You can download a Python 2.7 installer from [python.org](https://www.python.org/downloads/release/python-2711/). Section 3.3 of the [Python documentation](https://docs.python.org/2/using/windows.html) provides guidance for ensuring that you can execute Python programs from the command line. Installing the newest version of Python should get you `pip` automatically, but if you don't have it check out the instructions [here](https://pip.pypa.io/en/stable/installing/).
-  * **Linux** Get Python and `pip` from your package manager, if you don't already have them. On Ubuntu, try `sudo apt-get install python-pip`.
+  * **Linux** Get Python and `pip` from your package manager, if you don't already have them. On Ubuntu, try `sudo apt-get install python-pip`. To satisfy some other requirements below as well, try `sudo apt-get install python-numpy python-scipy python-matplotlib`.
 
-2. Install dependencies using `pip`. Execute these commands at the terminal or command line.
-  * `pip install numpy` (Numerical computing library)
+2. Install dependencies using `pip`. Execute these commands at the terminal or command line. On OSX/Linux you may need to preface them with `sudo`.
+  * `pip install numpy` (Numerical computing library) (may take a _very_ long time if it needs to rebuild from source)
+  * `pip install scipy` (more scientific/numerical computing things)
   * `pip install matplotlib` (Plotting utilities)
   * `pip install euclid` (concise 3D vector rotations)
   * `pip install plyfile` (read & write the `.ply` file format)
@@ -22,7 +22,24 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
 
 3. Download the code in this repository. Either use the _Download Zip_ button on the [repository page](https://github.com/nmwsharp/DDGSpring2016), or (if you are familiar with git) clone the repository.
 
-4. To verify the code works, open a terminal/command line in the Assignment0 directory, and execute `python testview.py ../meshes/bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing Assignment 1 it will look much nicer.
+4. To verify the code works, open a terminal in the Assignment0 directory, and execute `python testview.py ../meshes/bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing Assignment 1 it will look much nicer.
+
+##Getting started (Windows)
+Unfortunately, like most programming tasks, this will be a little trickier in Windows.
+
+1. Anaconda is Python distribution which automatically includes many useful components for scientific computing (and also sets things up quite nicely on Windows). Download and install the Python 2.7 version of Anaconda from https://www.continuum.io/downloads (keeping the default configuation options).
+
+2. We use a few additional packages beyond those included with Anaconda, get the first two by running the following commands in a command prompt
+  * `pip install euclid` (concise 3D vector rotations)
+  * `pip install plyfile` (read & write the `.ply` file format)
+
+3. The third package we need is called `pyopengl`, which contains bindings for 3D graphics and windowing. Unfortunately, there is an error involving the 64-bit version of `pyopengl` in the `pip` respository. If you are running 32-bit Windows (unlikely), you can just execute `pip install pyopengl` as above.
+
+  If you are running 64-bit Windows (most likely), you will need to download a proper version of the package here http://www.lfd.uci.edu/~gohlke/pythonlibs/, you want the file called `PyOpenGL-3.1.1b1-cp27-none-win_amd64.whl`. Then navigate to the file in the command prompt and execute `pip install PyOpenGL-3.1.1b1-cp27-none-win_amd64.whl`. This will install the package directly with the fixed version you just downloaded.
+
+4. Download the code in this repository. Either use the _Download Zip_ button on the [repository page](https://github.com/nmwsharp/DDGSpring2016), or (if you are familiar with git) clone the repository.
+
+5. To verify the code works, open a command prompt in the Assignment0 directory, and execute `python testview.py ..\meshes\bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing Assignment 1 it will look much nicer.
 
 ##About Python
 
