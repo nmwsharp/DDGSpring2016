@@ -18,6 +18,7 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
   * `pip install matplotlib` (Plotting utilities)
   * `pip install euclid` (concise 3D vector rotations)
   * `pip install plyfile` (read & write the `.ply` file format)
+     **Note:** On recent OSX machines, this may fail because System Integrity Protection makes it hard to upgrade numpy. In that case, try `pip install --ignore-installed plyfile`. 
   * `pip install pyopengl` (bindings for 3D graphics & windowing)
 
 3. Download the code in this repository. Either use the _Download Zip_ button on the [repository page](https://github.com/nmwsharp/DDGSpring2016), or (if you are familiar with git) clone the repository.
