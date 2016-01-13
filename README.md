@@ -22,7 +22,7 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
 
 3. Download the code in this repository. Either use the _Download Zip_ button on the [repository page](https://github.com/nmwsharp/DDGSpring2016), or (if you are familiar with git) clone the repository.
 
-4. To verify the code works, open a terminal in the Assignment0 directory, and execute `python testview.py ../meshes/bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing Assignment 1 it will look much nicer.
+4. To verify the code works, open a terminal in the Assignment0 directory, and execute `python testview.py ../meshes/bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing a future assignment it will look much nicer.
 
 ##Getting started (Windows)
 Unfortunately, like most programming tasks, this will be a little trickier in Windows.
@@ -39,7 +39,7 @@ Unfortunately, like most programming tasks, this will be a little trickier in Wi
 
 4. Download the code in this repository. Either use the _Download Zip_ button on the [repository page](https://github.com/nmwsharp/DDGSpring2016), or (if you are familiar with git) clone the repository.
 
-5. To verify the code works, open a command prompt in the Assignment0 directory, and execute `python testview.py ..\meshes\bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing Assignment 1 it will look much nicer.
+5. To verify the code works, open a command prompt in the Assignment0 directory, and execute `python testview.py ..\meshes\bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing a future assignment it will look much nicer.
 
 
 ##About Python
