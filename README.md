@@ -33,7 +33,7 @@ Unfortunately, like most programming tasks, this will be a little trickier in Wi
   * `pip install euclid` (concise 3D vector rotations)
   * `pip install plyfile` (read & write the `.ply` file format)
 
-3. The third package we need is called `pyopengl`, which contains bindings for 3D graphics and windowing. Unfortunately, there is an error involving the 64-bit version of `pyopengl` in the `pip` respository. If you are running 32-bit Windows (unlikely), you can just execute `pip install pyopengl` as above.
+3. The third package we need is called `pyopengl`, which contains bindings for 3D graphics and windowing. Unfortunately, there is an error involving the 64-bit version of `pyopengl` in the `pip` repository. If you are running 32-bit Windows (unlikely), you can just execute `pip install pyopengl` as above.
 
   If you are running 64-bit Windows (most likely), you will need to download a proper version of the package here http://www.lfd.uci.edu/~gohlke/pythonlibs/, you want the file called `PyOpenGL-3.1.1b1-cp27-none-win_amd64.whl`. Then navigate to the file in the command prompt and execute `pip install PyOpenGL-3.1.1b1-cp27-none-win_amd64.whl`. This will install the package directly with the fixed version you just downloaded.
 
