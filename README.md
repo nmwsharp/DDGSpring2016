@@ -9,11 +9,11 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
 ##Getting started (OSX and Linux)
 
 1. Make sure you have an installation of Python 2.7, including the `pip` package manager.
-  * **Mac** On recent OSX versions, Python is installed by default. Executing `sudo easy_install pip` in a terminal should install `pip`.
+  * **Mac** On recent OSX versions, Python is installed by default, and you may already have `pip` as well. Executing `sudo easy_install pip` in a terminal should install `pip` if not.
   * **Linux** Get Python and `pip` from your package manager, if you don't already have them. On Ubuntu, try `sudo apt-get install python-pip`. To satisfy some other requirements below as well, try `sudo apt-get install python-numpy python-scipy python-matplotlib`.
 
-2. Install dependencies using `pip`. Execute these commands at the terminal or command line. On OSX/Linux you may need to preface them with `sudo`.
-  * `pip install numpy` (Numerical computing library) (may take a _very_ long time if it needs to rebuild from source)
+2. Install dependencies using `pip`. Execute these commands at the terminal (you may need to preface them with `sudo`).
+  * `pip install numpy` (Numerical computing library)
   * `pip install scipy` (more scientific/numerical computing things)
   * `pip install matplotlib` (Plotting utilities)
   * `pip install euclid` (concise 3D vector rotations)
