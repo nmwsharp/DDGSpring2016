@@ -227,9 +227,7 @@ def main():
         print("\nUsing equally-weighted normals")
         Vertex.normal = vertexNormal_EquallyWeighted
         mesh.staticGeometry = True
-        meshDisplay.generateFaceData()
-        if toggleVertexVectors.val:
-            meshDisplay.generateVectorData()
+        meshDisplay.generateAllMeshValues()
     meshDisplay.registerKeyCallback('4', useEquallyWeightedNormals, docstring="Use equally-weighted normal computation")
 
     def useAreaWeightedNormals():
@@ -237,9 +235,7 @@ def main():
         print("\nUsing area-weighted normals")
         Vertex.normal = vertexNormal_AreaWeighted
         mesh.staticGeometry = True
-        meshDisplay.generateFaceData()
-        if toggleVertexVectors.val:
-            meshDisplay.generateVectorData()
+        meshDisplay.generateAllMeshValues()
     meshDisplay.registerKeyCallback('5', useAreaWeightedNormals, docstring="Use area-weighted normal computation")
 
     def useAngleWeightedNormals():
@@ -247,9 +243,7 @@ def main():
         print("\nUsing angle-weighted normals")
         Vertex.normal = vertexNormal_AngleWeighted
         mesh.staticGeometry = True
-        meshDisplay.generateFaceData()
-        if toggleVertexVectors.val:
-            meshDisplay.generateVectorData()
+        meshDisplay.generateAllMeshValues()
     meshDisplay.registerKeyCallback('6', useAngleWeightedNormals, docstring="Use angle-weighted normal computation")
 
     def useMeanCurvatureNormals():
@@ -257,9 +251,7 @@ def main():
         print("\nUsing mean curvature normals")
         Vertex.normal = vertexNormal_MeanCurvature
         mesh.staticGeometry = True
-        meshDisplay.generateFaceData()
-        if toggleVertexVectors.val:
-            meshDisplay.generateVectorData()
+        meshDisplay.generateAllMeshValues()
     meshDisplay.registerKeyCallback('7', useMeanCurvatureNormals, docstring="Use mean curvature normal computation")
 
     def useSphereInscribedNormals():
@@ -267,9 +259,7 @@ def main():
         print("\nUsing sphere-inscribed normals")
         Vertex.normal = vertexNormal_SphereInscribed
         mesh.staticGeometry = True
-        meshDisplay.generateFaceData()
-        if toggleVertexVectors.val:
-            meshDisplay.generateVectorData()
+        meshDisplay.generateAllMeshValues()
     meshDisplay.registerKeyCallback('8', useSphereInscribedNormals, docstring="Use sphere-inscribed normal computation")
 
     def computeDiscreteGaussBonnet():
