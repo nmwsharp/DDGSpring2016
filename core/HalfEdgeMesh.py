@@ -5,6 +5,15 @@ from math import acos, pi
 from TriSoupMesh import TriSoupMesh
 from Utilities import *
 
+# Iniialize the global counters for id numbers
+# NOTE: Global ID numbers mainly exist so that human debugging is easier
+# and doesn't require looking at memory addresses. If you want to use them for
+# program logic, you're probably wrong.
+NEXT_HALFEDGE_ID = 0
+NEXT_VERTEX_ID = 0
+NEXT_FACE_ID = 0
+NEXT_EDGE_ID = 0
+
 # A mesh composed of halfedge elements.
 # This class follows a "fast and loose" python design philosophy. Data is stored
 # on halfedges/vertices/edges/etc as it's created.
@@ -31,6 +40,9 @@ class HalfEdgeMesh(object):
         # TODO these names are lame
         self.halfEdgesFull = set()
         self.facesFull = set()
+
+        # This is operated on by the getters and setters below
+        self._staticGeometry = staticGeometry
 
         print('\nConstructing HalfEdge Mesh...')
 
@@ -148,16 +160,12 @@ class HalfEdgeMesh(object):
         # This is where we use edgeHalfEdgeDict.
         for (edgeKey, halfEdgeList) in edgeHalfEdgeDict.iteritems():
 
-            # print(edgeKey)
-            # print(halfEdgeList)
-
             # Assuming the mesh is well-formed, this must be a list with two elements
             if(len(halfEdgeList) == 2):
                 halfEdgeList[0].twin = halfEdgeList[1]
                 halfEdgeList[1].twin = halfEdgeList[0]
             elif(len(halfEdgeList) > 2):
                 raise ValueError('Mesh has more than two faces meeting at some edge')
-
 
         # Close boundaries by iterating around each hole and creating an imaginary face to cover the hole,
         # along with the associated halfedges. Note that this face will not be a triangle, in general.
@@ -216,7 +224,7 @@ class HalfEdgeMesh(object):
         self.printMeshStats(printImaginary=True)
         if checkMesh:
             self.checkMeshReferences()
-        self.checkDegenerateFaces() # a lot of meshes fail this...
+        #self.checkDegenerateFaces() # a lot of meshes fail this...
 
     # Perform a basic refence validity check to catch blatant errors
     # Throws and error if it finds something broken about the datastructure
@@ -306,7 +314,7 @@ class HalfEdgeMesh(object):
             seenPos = set()
             vList = []
             for v in face.adjacentVerts():
-                pos = tuple(v.pos.tolist()) # need it as a hashable type
+                pos = tuple(v.position.tolist()) # need it as a hashable type
                 if pos in seenPos:
                     raise ValueError("ERROR: Degenerate mesh face has repeated vertices at position: " + str(pos))
                 else:
@@ -351,6 +359,38 @@ class HalfEdgeMesh(object):
         print('    - n boundary verts = ' + str(nBoundaryVerts))
 
 
+    # If this mesh has boundaries, close them (make the imaginary faces/halfedges real).
+    # The resulting mesh will be manifold.
+    # Note: This naively triangulates non-triangular boundary faces, and thus can create
+    # low quality meshes
+    # TODO implement
+    def fillBoundaries(self):
+        raise NotImplementedError('fillBoundaries is not yet implemented')
+
+
+    # Need to clear the caches whenever staticGeometry is made False
+    # TODO this all could probably use a bit of testing
+    @property
+    def staticGeometry(self):
+        return self._staticGeometry
+    @staticGeometry.setter
+    def staticGeometry(self, staticGeometry):
+
+        # Clear the caches (only needed when going from True-->False)
+        if staticGeometry == False:
+            for v in self.verts: v._cache.clear()
+            for e in self.edges: e._cache.clear()
+            for f in self.facesFull: f._cache.clear()
+            for he in self.halfEdgesFull: he._cache.clear()
+
+        # Update the static settings
+        for v in self.verts: v.staticGeometry = staticGeometry
+        for e in self.edges: e.staticGeometry = staticGeometry
+        for f in self.facesFull: f.staticGeometry = staticGeometry
+        for he in self.halfEdgesFull: he.staticGeometry = staticGeometry
+
+        self._staticGeometry = staticGeometry
+
     def enumerateVertices(self, subset=None):
         """
         Return a dictionary which assigns a 0-indexed integer to each vertex
@@ -375,10 +415,10 @@ class HalfEdgeMesh(object):
     def assignReferenceDirections(self):
         '''
         For each vertex in the mesh, arbitrarily selects one outgoing halfedge
-        as a reference ('refEdge').
+        as a reference ('referenceEdge').
         '''
         for vert in self.verts:
-            vert.refEdge = vert.anyHalfEdge
+            vert.referenceEdge = vert.anyHalfEdge
 
 
     def applyVertexValue(self, value, attributeName):
@@ -396,7 +436,6 @@ class HalfEdgeMesh(object):
 
     # Returns a brand new TriSoupMesh corresponding to this mesh
     # 'retainVertAttr' is a list of vertex-valued attributes to carry in to th trisoupmesh
-    # NOTE Always saves normals.
     # TODO do face attributes (and maybe edge?)
     # TODO Maybe implement a 'view' version of this, so that we can modify the HalfEdge mesh
     # without completely recreating a new TriSoup mesh.
@@ -406,21 +445,17 @@ class HalfEdgeMesh(object):
         vertAttr = dict()
         for attr in retainVertAttr:
             vertAttr[attr] = []
-        vertAttr['normal'] = []
 
         # Iterate over the vertices, numbering them and building an array
         vertArr = []
         vertInd = {}
         for (ind, v) in enumerate(self.verts):
-            vertArr.append(v.pos)
+            vertArr.append(v.position)
             vertInd[v] = ind
 
             # Add any vertex attributes to the list
             for attr in retainVertAttr:
                 vertAttr[attr].append(getattr(v, attr))
-
-            # Always save normals
-            vertAttr['normal'].append(v.normal)
 
         # Iterate over the faces, building a list of the verts for each
         faces = []
@@ -444,6 +479,27 @@ class HalfEdgeMesh(object):
 
         return soupMesh
 
+### A decorator which automatically caches static geometric values
+#
+# The invariant for how staticGeometry works is:
+#   - The staticGeometry flag should only be changed by setting/unsetting it
+#     in the mesh which holds this object (to ensure it gets set/unset everywhere,
+#     since the result of cached computation may be stored in a distant object)
+#   - If there is anything in the cache, it must be valid to return it. Thus,
+#     the cache must be emptied when staticGeometry is set to False.
+#
+# It would be nice to automatically empty the cache whenever a vertex position is
+# changed and forget about the flag. However, this would require recusively updating
+# all of the caches which depend on that value. Possible, but a little complex and
+# maybe slow.
+def cacheGeometry(f):
+    name = f.__name__
+    def cachedF(self=None):
+        if name in self._cache: return self._cache[name]
+        res = f(self)
+        if self.staticGeometry: self._cache[name] = res
+        return res
+    return cachedF
 
 class HalfEdge(object):
 
@@ -461,17 +517,27 @@ class HalfEdge(object):
         self._cache = dict()
         self.staticGeometry = staticGeometry
 
+        # Global id number, mainly for debugging
+        global NEXT_HALFEDGE_ID
+        self.id = NEXT_HALFEDGE_ID
+        NEXT_HALFEDGE_ID += 1
+
+    ## Slightly prettier print function
+    # TODO Maybe make repr() more verbose?
+    def __str__(self):
+        return "<HalfEdge #{}>".format(self.id)
+    def __repr__(self):
+        return self.__str__()
 
     # Return a boolean indicating whether this is on the boundary of the mesh
     def isBoundary(self):
         return not self.twin.isReal
 
     @property
+    @cacheGeometry
     def vector(self):
         """The vector represented by this halfedge"""
-        if 'vector' in self._cache: return self._cache['vector']
-        v = self.vertex.pos - self.twin.vertex.pos
-        if self.staticGeometry: self._cache['vector'] = v
+        v = self.vertex.position - self.twin.vertex.position
         return v
 
 
@@ -490,12 +556,25 @@ class Vertex(object):
         self._cache = dict()
         self.staticGeometry = staticGeometry
 
+        # Global id number, mainly for debugging
+        global NEXT_VERTEX_ID
+        self.id = NEXT_VERTEX_ID
+        NEXT_VERTEX_ID += 1
+
+    ## Slightly prettier print function
+    # TODO Maybe make repr() more verbose?
+    def __str__(self):
+        return "<Vertex #{}>".format(self.id)
+    def __repr__(self):
+        return self.__str__()
+
+
     @property
-    def pos(self):
+    def position(self):
         return self._pos
 
-    @pos.setter
-    def pos(self, value):
+    @position.setter
+    def position(self, value):
         if self.staticGeometry:
             raise ValueError("ERROR: Cannot write to vertex position with staticGeometry=True. To allow dynamic geometry, set staticGeometry=False when creating vertex (or in the parent mesh constructor)")
         self._pos = value
@@ -517,6 +596,7 @@ class Vertex(object):
             if(curr == first):
                 break
 
+
     # Iterate over the edges adjacent to this vertex
     def adjacentEdges(self):
 
@@ -530,6 +610,7 @@ class Vertex(object):
             curr = curr.twin.next
             if(curr == first):
                 break
+
 
     # Iterate over the halfedges adjacent to this vertex
     def adjacentHalfEdges(self):
@@ -559,7 +640,7 @@ class Vertex(object):
             if(curr == first):
                 break
 
-    def adjacentHalfEdgeVertexPairs(self):
+    def adjacentEdgeVertexPairs(self):
         """
         Iterate through the neighbors of this vertex, yielding a (edge,vert) tuple
         """
@@ -593,25 +674,11 @@ class Vertex(object):
 
     # Returns the number edges/faces neighboring this vertex
     @property
+    @cacheGeometry
     def degree(self):
-        if 'degree' in self._cache: return self._cache['degree']
 
         d = sum(1 for e in self.adjacentEdges())
-
-        if self.staticGeometry: self._cache['degree'] = d
         return d
-
-
-    @property
-    def normal(self):
-        """The area-weighted normal vector for this face"""
-        if 'normal' in self._cache: return self._cache['normal']
-
-        # Implement me please!
-        n = 0.0
-
-        if self.staticGeometry: self._cache['normal'] = n
-        return n
 
 class Face(object):
 
@@ -626,6 +693,18 @@ class Face(object):
 
         self._cache = dict()
         self.staticGeometry = staticGeometry
+
+        # Global id number, mainly for debugging
+        global NEXT_FACE_ID
+        self.id = NEXT_FACE_ID
+        NEXT_FACE_ID += 1
+
+    ## Slightly prettier print function
+    # TODO Maybe make repr() more verbose?
+    def __str__(self):
+        return "<Face #{}>".format(self.id)
+    def __repr__(self):
+        return self.__str__()
 
     # Return a boolean indicating whether this is on the boundary of the mesh
     def isBoundary(self):
@@ -688,29 +767,18 @@ class Face(object):
             if(curr == first):
                 break
 
-
     @property
-    def normal(self):
-        """The normal vector for this face"""
-        if 'normal' in self._cache: return self._cache['normal']
+    @cacheGeometry
+    def center(self):
+        """The center of this face"""
 
-        # Implement me please!
-        n = np.array([0.0,0.0,0.0])
+        v1 = self.anyHalfEdge.vertex.position
+        v2 = self.anyHalfEdge.next.vertex.position
+        v3 = self.anyHalfEdge.next.next.vertex.position
 
-        if self.staticGeometry: self._cache['normal'] = n
-        return n
+        c = (v1 + v2 + v3) / 3.0
 
-
-    @property
-    def area(self):
-        """The (signed) area of this face"""
-        if 'area' in self._cache: return self._cache['area']
-
-        # Implement me please!
-        a = np.array([0.0,0.0,0.0])
-
-        if self.staticGeometry: self._cache['area'] = a
-        return a
+        return c
 
 class Edge(object):
 
@@ -723,7 +791,90 @@ class Edge(object):
         self._cache = dict()
         self.staticGeometry = staticGeometry
 
+        # Global id number, mainly for debugging
+        global NEXT_EDGE_ID
+        self.id = NEXT_EDGE_ID
+        NEXT_EDGE_ID += 1
+
+    ## Slightly prettier print function
+    # TODO Maybe make repr() more verbose?
+    def __str__(self):
+        return "<Edge #{}>".format(self.id)
+    def __repr__(self):
+        return self.__str__()
 
     # Return a boolean indicating whether this is on the boundary of the mesh
     def isBoundary(self):
         return self.anyHalfEdge.isBoundary()
+
+    # Return true if the edge can be flipped, meaning:
+    #   - The edge is not on the boundary
+    #   - Neither of the verts that neighbor the edge has degree <= 3
+    def canFlip(self):
+
+        if self.isBoundary():
+            return False
+
+        # Can only flip if both vertices have degree > 3
+        v1 = self.anyHalfEdge.vertex
+        v2 = self.anyHalfEdge.twin.vertex
+
+        return v1.degree() > 3 and v2.degree() > 3
+
+
+    # Flip this edge
+    # Does nothing if canFlip() returns false
+    def flip(self):
+
+        if self.staticGeometry:
+            raise ValueError("ERROR: Cannot flip edge with static geometry")
+
+        if not self.canFlip():
+            return
+
+        # Note: This does a complete reassignment of references, which will likely include
+        # changing things that don't technically need to be changed (like anyHalfEdge refs
+        # that weren't actually invalidated). This is done for simplicity and conciseness.
+
+
+        # Get references to the relevant objects
+        h1 = self.anyHalfEdge
+        h2 = h1.twin
+        h1n = h1.next
+        h1nn = h1n.next
+        h2n = h2.next
+        h2nn = h2n.next
+        e = h1.edge
+        f1 = h1.face
+        f2 = h2.face
+        Vold1 = h1.vertex
+        Vold2 = h2.vertex
+        Vnew1 = h1.next.vertex
+        Vnew2 = h2.next.vertex
+
+
+        ## Re-assign pointers
+        # This edge
+        self.anyHalfEdge = h1
+        h1.vertex = Vnew2
+        h2.vertex = Vnew1
+
+        # Lower face HE loop
+        h1.next = h2nn
+        h2nn.next = h1n
+        h1n.next = h1
+
+        # Upper face HE loop
+        h2.next = h1nn
+        h1nn.next = h2n
+        h2n.next = h2
+
+        # Faces
+        f1.anyHalfEdge = h1
+        f2.anyHalfEdge = h2
+        h2nn.face = f1
+        h1nn.face = f2
+
+        # Verts
+        Vold1.anyHalfEdge = h1n
+        Vold2.anyHalfEdge = h2n

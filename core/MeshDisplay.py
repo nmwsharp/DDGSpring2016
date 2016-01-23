@@ -1,4 +1,6 @@
-# Visualize a mesh using pyopengl (wrapping openGL)
+# Visualize a mesh using openGL
+
+# TODO check out this for drawing edges http://www2.imm.dtu.dk/pubdb/views/edoc_download.php/4884/pdf/imm4884.pdf
 
 # System imports
 import os
@@ -15,27 +17,28 @@ from OpenGL.GLUT import *
 
 # Local imports
 from Utilities import normalize
-from HalfEdgeMesh import HalfEdgeMesh
+from HalfEdgeMesh import HalfEdgeMesh, Face, Edge, Vertex, HalfEdge
 from TriSoupMesh import TriSoupMesh
 from Utilities import normalize, norm, cross
 from Camera import Camera
 
 
+# TODO implement easier to use logic for when to update the data in buffers.
+# Don't really want to update every time setXXX() is called, because that might
+# be wasteful. However, it would be nice if that didn't need to be tracked externally.
+# Maybe set a dirty flag then regenerate data as needed before a draw() call?
+
 
 # Dictionary of known vertex shaders
 vertShaders = {
-    'plain' : "shaders/plain.vert",
-    'shiny' : "shaders/shiny.vert",
-    'edges' : "shaders/edges.vert",
     'surf-draw': "shaders/surf-draw.vert",
+    'flat-draw': "shaders/flat-draw.vert",
 }
 
 # Dictionary of known fragment shaders
 fragShaders = {
-    'plain' : "shaders/plain.frag",
-    'shiny' : "shaders/shiny.frag",
-    'edges' : "shaders/edges.frag",
     'surf-draw': "shaders/surf-draw.frag",
+    'flat-draw': "shaders/flat-draw.frag",
 }
 
 
@@ -81,7 +84,10 @@ class MeshDisplay(object):
         self.edgeFragShader = 'edges'
         self.shapeAlpha = 1.0    # NOTE this means order matters, and must be enabled in glInit() below
         self.edgeAlpha = 1.0
-        self.lineWidth = 1.0
+        self.lineWidthCoef = 0.05
+        self.lineWidthScaleCoef = 0.05
+        self.pointSize = 1.0 # TODO this is currently unused, pointsize is hardcoded in to the shader. Need to expose as a uniform.
+        self.nRadialPoints = 12
         self.drawShape = True
         self.drawEdges = False
         self.drawVertices = False
@@ -98,37 +104,52 @@ class MeshDisplay(object):
         self.nEdges = -1
         self.dataCenter = np.array([0.0,0.0,0.0])  # A reasonable center for the data
         self.scaleFactor = 1.0         # A scale factor for the magnitude of the data
-        self.retainVertAttr = []       # Mesh vertex attributes that are important (= displayed)
+        self.medianEdgeLength = -1
 
         # Display members
         self.meshPrograms = []
         self.shapeProg = None
         self.edgeProg = None
         self.vertProg = None
-        self.surfVecProg = None
+        self.meshPickPrograms = []
+        self.shapePickProg = None
+        self.edgePickProg = None
+        self.vertPickProg = None
+        self.vectorProg = None
         self.camera = None
+        self.nShapeVerts = -1
 
         # Coloring options
         self.colorMethod = 'constant' # other possibilites: 'rgbData','scalarData'
         self.colorAttrName = None
+        self.colorDefinedOn = None # one of 'vertex', 'face', 'edge'
         self.vMinMax = None
         self.cmapName = None
-        self.vertexDotColor = 'black'
 
-        # Surface vector drawing options
-        self.vectorMethod = 'none'  # other possbilities: 'directionData', 'vectorData'
+        # Members for picking
+        self.pickArray = None
+        self.pickInd = dict()
+        self.PICK_IND_MAX = 255
+        self.pickVertexCallback = None
+        self.pickFaceCallback = None
+        self.pickEdgeCallback = None
+
+        # Vector drawing options
         self.vectorAttrName = None
+        self.vectorDefinedAt = None # One of 'vertex' or 'face'
+        self.vectorIsTangent = False
+        self.vectorIsUnit = False
         self.vectorRefDirAttrName = None
-        self.vectorNsym = None            # symmetry order of the data to be drawn
-        self.vectorColor = np.array(self.colors['red'])
-        self.nVector = -1           # The number of vectors to be drawn
+        self.vectorNsym = 1            # symmetry order of the data to be drawn
         self.nVectorVerts = -1      # The size of the vertex buffer needed for
                                     #   specifying vector positions
+        self.kVectorPrism = 8       # Number of sides to use when drawing the vectors
 
         # Set window parameters
         self.windowTitle = windowTitle
         self.windowWidth = width
         self.windowHeight = height
+        self.lastClickPos = None
 
         # Initialize the GL/Glut environment
         self.initGLUT()
@@ -152,107 +173,140 @@ class MeshDisplay(object):
         self.shapeColor = np.array(self.colors['orange'])
         self.edgeColorLight = np.array(self.colors['almost_white'])
         self.edgeColorDark = np.array(self.colors['dark_grey'])
+        self.edgeColor = self.edgeColorDark
+        # self.vertexDotColor = np.array(self.colors['dark_grey']) # just use edge color
+        self.vectorColor = np.array(self.colors['red'])
 
-        # Set up the mesh shader program
+        # Set up the mesh shader programs for drawing
         self.prepareShapeProgram()
         self.prepareEdgeProgram()
         self.prepareVertexProgram()
+
+        # Set up the mesh shader programs for picking
+        self.prepareShapeProgram(pick=True)
+        self.prepareEdgePickProgram()
+        self.prepareVertexPickProgram()
 
         if mesh is not None:
             self.setMesh(mesh)
 
 
-    def prepareShapeProgram(self):
-        """Create an openGL program and all associated buffers to render mesh triangles"""
+    def preparePrettyShaderProgram(self):
+        """Prepare a program which draws using positions/normals/colors with nice shading"""
 
-        self.shapeProg = ShaderProgram(vertShaders[self.shapeVertShader],
-                                      fragShaders[self.shapeFragShader])
+        prog = ShaderProgram(vertShaders['surf-draw'],
+                                      fragShaders['surf-draw'])
 
         # Bind the output location for the fragment shader
-        glBindFragDataLocation(self.shapeProg.handle, 0, "outputF");
+        glBindFragDataLocation(prog.handle, 0, "outputF");
 
         # Create uniforms
-        self.shapeProg.createUniform('projMatrix', 'u_projMatrix', 'matrix_4')
-        self.shapeProg.createUniform('viewMatrix', 'u_viewMatrix', 'matrix_4')
-        self.shapeProg.createUniform('alpha', 'u_alpha', 'scalar')
-        self.shapeProg.createUniform('eyeLoc', 'u_eye', 'vector_3')
-        self.shapeProg.createUniform('lightLoc', 'u_light', 'vector_3')
-        self.shapeProg.createUniform('dataCenter', 'u_dataCenter', 'vector_3')
+        prog.createUniform('projMatrix', 'u_projMatrix', 'matrix_4')
+        prog.createUniform('viewMatrix', 'u_viewMatrix', 'matrix_4')
+        prog.createUniform('alpha', 'u_alpha', 'scalar')
+        prog.createUniform('eyeLoc', 'u_eye', 'vector_3')
+        prog.createUniform('lightLoc', 'u_light', 'vector_3')
+        prog.createUniform('dataCenter', 'u_dataCenter', 'vector_3')
+        prog.createUniform('depthOffset', 'u_depthOffset', 'scalar')
 
         # Make a VAO for the mesh
-        self.shapeProg.createVAO('meshVAO')
+        prog.createVAO('meshVAO')
 
         # VBO for positions
-        self.shapeProg.createVBO(
+        prog.createVBO(
             vboName = 'vertPos', varName = 'a_position', vaoName = 'meshVAO', nPerVert = 3)
 
         # VBO for colors
-        self.shapeProg.createVBO(
+        prog.createVBO(
             vboName = 'vertColor', varName = 'a_color', vaoName = 'meshVAO', nPerVert = 3)
 
         # VBO for normals
-        self.shapeProg.createVBO(
+        prog.createVBO(
             vboName = 'vertNorm', varName = 'a_normal', vaoName = 'meshVAO', nPerVert = 3)
 
-        # VBO for array indices
-        self.shapeProg.createIndexBuffer(vboName = 'triIndex',  vaoName = 'meshVAO')
+        return prog
 
-        # Set a draw function for the mesh program
+    def prepareFlatShaderProgram(self):
+        """
+        Prepare a program which draws using positions/colors without shading
+        (used for picking)
+        """
+
+        prog = ShaderProgram(vertShaders['flat-draw'],
+                                      fragShaders['flat-draw'])
+
+        # Bind the output location for the fragment shader
+        glBindFragDataLocation(prog.handle, 0, "outputF");
+
+        # Create uniforms
+        prog.createUniform('projMatrix', 'u_projMatrix', 'matrix_4')
+        prog.createUniform('viewMatrix', 'u_viewMatrix', 'matrix_4')
+        prog.createUniform('alpha', 'u_alpha', 'scalar')
+        prog.createUniform('dataCenter', 'u_dataCenter', 'vector_3')
+        prog.createUniform('depthOffset', 'u_depthOffset', 'scalar')
+
+        # Make a VAO for the mesh
+        prog.createVAO('meshVAO')
+
+        # VBO for positions
+        prog.createVBO(
+            vboName = 'vertPos', varName = 'a_position', vaoName = 'meshVAO', nPerVert = 3)
+
+        # VBO for colors
+        prog.createVBO(
+            vboName = 'vertColor', varName = 'a_color', vaoName = 'meshVAO', nPerVert = 3)
+
+        return prog
+
+    def prepareShapeProgram(self, pick=False):
+        """Create an openGL program and all associated buffers to render mesh triangles"""
+
+        if pick:
+            prog = self.prepareFlatShaderProgram()
+        else:
+            prog = self.preparePrettyShaderProgram()
+
         def drawMesh():
-            # Setup
-            glBindVertexArray(self.shapeProg.vaoHandle['meshVAO'])
+            glBindVertexArray(prog.vaoHandle['meshVAO'])
+            glDrawArrays(GL_TRIANGLES, 0, self.nShapeVerts)
+        prog.drawFunc = drawMesh
 
-            # Draw
-            glDrawElements(GL_TRIANGLES, 3*self.nFaces, GL_UNSIGNED_INT, None)
-            # glDrawElements(GL_LINES, self.nEdges, GL_UNSIGNED_INT, None)
-        self.shapeProg.drawFunc = drawMesh
-
-        self.meshPrograms.append(self.shapeProg)
+        if pick:
+            self.meshPickPrograms.append(prog)
+            self.shapePickProg = prog
+        else:
+            self.meshPrograms.append(prog)
+            self.shapeProg = prog
 
 
     def prepareEdgeProgram(self):
         """Create an openGL program and all associated buffers to render mesh edges"""
 
-        self.edgeProg = ShaderProgram(vertShaders[self.edgeVertShader],
-                                      fragShaders[self.edgeFragShader])
+        prog = self.preparePrettyShaderProgram()
 
-        # Bind the output location for the fragment shader
-        glBindFragDataLocation(self.edgeProg.handle, 0, "outputF");
-
-        # Create uniforms
-        self.edgeProg.createUniform('projMatrix', 'u_projMatrix', 'matrix_4')
-        self.edgeProg.createUniform('viewMatrix', 'u_viewMatrix', 'matrix_4')
-        self.edgeProg.createUniform('color', 'u_color', 'vector_3')
-        self.edgeProg.createUniform('alpha', 'u_alpha', 'scalar')
-        self.edgeProg.createUniform('depthOffset', 'u_depthOffset', 'scalar')
-        self.edgeProg.createUniform('eyeLoc', 'u_eye', 'vector_3')
-        self.edgeProg.createUniform('lightLoc', 'u_light', 'vector_3')
-        self.edgeProg.createUniform('dataCenter', 'u_dataCenter', 'vector_3')
-
-        # Make a VAO for the mesh
-        self.edgeProg.createVAO('meshVAO')
-
-        # VBO for positions
-        self.edgeProg.createVBO(
-            vboName = 'vertPos', varName = 'a_position', vaoName = 'meshVAO', nPerVert = 3)
-
-        # VBO for normals
-        self.edgeProg.createVBO(
-            vboName = 'vertNorm', varName = 'a_normal', vaoName = 'meshVAO', nPerVert = 3)
-
-        # VBO for array indices
-        self.edgeProg.createIndexBuffer(vboName = 'edgeIndex',  vaoName = 'meshVAO')
-
-        # Set a draw function for the mesh program
         def drawMesh():
-            # Setup
-            glBindVertexArray(self.edgeProg.vaoHandle['meshVAO'])
+            glBindVertexArray(prog.vaoHandle['meshVAO'])
+            edgeArrLen = 6*self.nEdges if self.drawShape else 12*self.nEdges
+            glDrawArrays(GL_TRIANGLES, 0, edgeArrLen)
+        prog.drawFunc = drawMesh
 
-            # Draw
-            glDrawElements(GL_LINES, 2*self.nEdges, GL_UNSIGNED_INT, None)
-        self.edgeProg.drawFunc = drawMesh
+        self.meshPrograms.append(prog)
+        self.edgeProg = prog
 
-        self.meshPrograms.append(self.edgeProg)
+
+    def prepareEdgePickProgram(self):
+        """Create an openGL program and all associated buffers to render mesh edges"""
+
+        prog = self.prepareFlatShaderProgram()
+
+        def drawMesh():
+            glBindVertexArray(prog.vaoHandle['meshVAO'])
+            edgeArrLen = 6*self.nEdges if self.drawShape else 12*self.nEdges
+            glDrawArrays(GL_TRIANGLES, 0, edgeArrLen)
+        prog.drawFunc = drawMesh
+
+        self.meshPickPrograms.append(prog)
+        self.edgePickProg = prog
 
 
     def prepareVertexProgram(self):
@@ -261,96 +315,50 @@ class MeshDisplay(object):
         # Need to make sure we can adjust the size of the points first
         glEnable( GL_PROGRAM_POINT_SIZE )
 
-        self.vertProg = ShaderProgram(vertShaders['surf-draw'],
-                                      fragShaders['surf-draw'])
+        prog = self.preparePrettyShaderProgram()
 
-        # Bind the output location for the fragment shader
-        glBindFragDataLocation(self.vertProg.handle, 0, "outputF");
-
-        # Create uniforms
-        self.vertProg.createUniform('projMatrix', 'u_projMatrix', 'matrix_4')
-        self.vertProg.createUniform('viewMatrix', 'u_viewMatrix', 'matrix_4')
-        # self.vertProg.createUniform('color', 'u_color', 'vector_3')
-        self.vertProg.createUniform('alpha', 'u_alpha', 'scalar')
-        self.vertProg.createUniform('depthOffset', 'u_depthOffset', 'scalar')
-        self.vertProg.createUniform('eyeLoc', 'u_eye', 'vector_3')
-        self.vertProg.createUniform('lightLoc', 'u_light', 'vector_3')
-        self.vertProg.createUniform('dataCenter', 'u_dataCenter', 'vector_3')
-
-        # Make a VAO for the mesh
-        self.vertProg.createVAO('meshVAO')
-
-        # VBO for positions
-        self.vertProg.createVBO(
-            vboName = 'vertPos', varName = 'a_position', vaoName = 'meshVAO', nPerVert = 3)
-
-        # VBO for normals
-        self.vertProg.createVBO(
-            vboName = 'vertNorm', varName = 'a_normal', vaoName = 'meshVAO', nPerVert = 3)
-
-        # VBO for colors
-        self.vertProg.createVBO(
-            vboName = 'vertColor', varName = 'a_color', vaoName = 'meshVAO', nPerVert = 3)
-
-
-        # Set a draw function for the mesh program
         def drawMesh():
-            # Setup
-            glBindVertexArray(self.vertProg.vaoHandle['meshVAO'])
+            # glPointSize(self.pointSize)
+            glBindVertexArray(prog.vaoHandle['meshVAO'])
+            vertArrLen = self.nVerts*self.nRadialPoints*3 if self.drawShape else 2*self.nVerts*self.nRadialPoints*3
+            glDrawArrays(GL_TRIANGLES, 0, vertArrLen)
+        prog.drawFunc = drawMesh
 
-            # Draw
-            glDrawArrays(GL_POINTS, 0, self.nVerts)
-        self.vertProg.drawFunc = drawMesh
-
-        self.meshPrograms.append(self.vertProg)
+        self.meshPrograms.append(prog)
+        self.vertProg = prog
 
 
-    def prepareSurfVecProgram(self):
+    def prepareVertexPickProgram(self):
+        """Create an openGL program to draw a dot at every vertex"""
+
+        # Need to make sure we can adjust the size of the points first
+        glEnable( GL_PROGRAM_POINT_SIZE )
+
+        prog = self.prepareFlatShaderProgram()
+
+        def drawMesh():
+            # glPointSize(6*self.pointSize)
+            glBindVertexArray(prog.vaoHandle['meshVAO'])
+            vertArrLen = self.nVerts*self.nRadialPoints*3 if self.drawShape else 2*self.nVerts*self.nRadialPoints*3
+            glDrawArrays(GL_TRIANGLES, 0, vertArrLen)
+        prog.drawFunc = drawMesh
+
+        self.meshPickPrograms.append(prog)
+        self.vertPickProg = prog
+
+
+    def prepareVectorProgram(self):
         """Create an openGL program to draw vectors on the surface of a mesh"""
 
-        self.surfVecProg = ShaderProgram(vertShaders['surf-draw'],
-                                      fragShaders['surf-draw'])
+        prog = self.preparePrettyShaderProgram()
 
-        # Bind the output location for the fragment shader
-        glBindFragDataLocation(self.surfVecProg.handle, 0, "outputF");
-
-        # Create uniforms
-        self.surfVecProg.createUniform('projMatrix', 'u_projMatrix', 'matrix_4')
-        self.surfVecProg.createUniform('viewMatrix', 'u_viewMatrix', 'matrix_4')
-        # self.surfVecProg.createUniform('color', 'u_color', 'vector_3')
-        self.surfVecProg.createUniform('alpha', 'u_alpha', 'scalar')
-        self.surfVecProg.createUniform('depthOffset', 'u_depthOffset', 'scalar')
-        self.surfVecProg.createUniform('eyeLoc', 'u_eye', 'vector_3')
-        self.surfVecProg.createUniform('lightLoc', 'u_light', 'vector_3')
-        self.surfVecProg.createUniform('dataCenter', 'u_dataCenter', 'vector_3')
-
-        # Make a VAO for the mesh
-        self.surfVecProg.createVAO('meshVAO')
-
-        # VBO for positions
-        self.surfVecProg.createVBO(
-            vboName = 'vertPos', varName = 'a_position', vaoName = 'meshVAO', nPerVert = 3)
-
-        # VBO for normals
-        self.surfVecProg.createVBO(
-            vboName = 'vertNorm', varName = 'a_normal', vaoName = 'meshVAO', nPerVert = 3)
-
-        # VBO for colors
-        self.surfVecProg.createVBO(
-            vboName = 'vertColor', varName = 'a_color', vaoName = 'meshVAO', nPerVert = 3)
-
-
-        # Set a draw function for the mesh program
         def drawMesh():
-            # Setup
-            glBindVertexArray(self.surfVecProg.vaoHandle['meshVAO'])
+            glBindVertexArray(prog.vaoHandle['meshVAO'])
+            glDrawArrays(GL_TRIANGLES, 0, self.nVectorVerts)
+        prog.drawFunc = drawMesh
 
-            # Draw
-            glDrawArrays(GL_LINES, 0, self.nVectorVerts)
-        self.surfVecProg.drawFunc = drawMesh
-
-        self.meshPrograms.append(self.surfVecProg)
-
+        self.meshPrograms.append(prog)
+        self.vectorProg = prog
 
     def setMesh(self, mesh):
         """Set a mesh as the current mesh object to be drawn by this viewer"""
@@ -358,73 +366,57 @@ class MeshDisplay(object):
         # TODO Properly deallocate buffers to make sure nothing is leaking if this
         # is called many times
 
-        # Save the mesh
+        # Save and validate the mesh
         self.mesh = mesh
+        self.checkMesh()
 
-        ## In general, mesh data is read using readNewMeshValues(). However,
-        ## we also read from the mesh to do some initial setup.
-        triSoupMesh = self.currMeshAsSoupWithProperties()
-
-
-        self.nFaces = len(triSoupMesh.tris)
-        self.nVerts = len(triSoupMesh.verts)
-        self.nEdges = 3*self.nFaces
+        self.nFaces = len(mesh.faces)
+        self.nVerts = len(mesh.verts)
+        self.nEdges = len(mesh.edges)
 
         # Compute scale and centering factors. These are stored in the uniforms
         # and applied in the shaders
-        self.computeScale(triSoupMesh)
+        self.computeScale()
         self.camera.zoomDist = self.scaleFactor
 
         # Initial camera distance
         self.camera.zoomDist = self.scaleFactor
 
-
-        # Connectivity information is stored here, rather than in readNewMeshValues(),
-        # because it should not be changing after the mesh is initialized.
-        faceIndData = triSoupMesh.tris.astype(np.uint32)
-        edgeIndData = self.generateEdges(triSoupMesh).astype(np.uint32)
-
-        # Face drawing data
-        # Store the vertex position, triangle indices, and normals in the buffers
-        glBindVertexArray(self.shapeProg.vaoHandle['meshVAO'])
-        self.shapeProg.setVBOData('triIndex', faceIndData)
-
-        # Edge drawing data
-        # Store the vertex position and triangle indices in the buffers
-        glBindVertexArray(self.edgeProg.vaoHandle['meshVAO'])
-        self.edgeProg.setVBOData('edgeIndex', edgeIndData)
-
-
-    def currMeshAsSoupWithProperties(self):
+    def checkMesh(self):
         """
-        Returns the current mesh as a triangle soup mesh, converting as necessary
-        and preseving any important properties
+        Verify that the mesh has triangular faces and valid positions
         """
 
-        # If the input mesh is a halfedge mesh, convert it to a trisoupmesh first
-        if type(self.mesh) is HalfEdgeMesh:
+        # Verify triangle Mesh
+        for he in self.mesh.halfEdges:
+            if he.next.next.next is not he:
+                print("ERROR: Halfedge {} does not have triangular connectivity.".format(str(he)))
+                raise ValueError("ERROR: MeshDisplay can only display triangular meshes")
 
-            # Perform the conversion
-            # Just keep all of the attributes. Some of them might be used for
-            # coloring/annotation and we don't want to worry about it
-            triSoupMesh = self.mesh.toTriSoupmesh(retainVertAttr=self.retainVertAttr)
 
-        # Typecheck for good luck
-        elif type(self.mesh) is not TriSoupMesh:
-            raise ValueError("ERROR: setMesh can only accept the types 'TriSoupMesh' and 'HalfEdgeMesh'")
-        else:
-            triSoupMesh = self.mesh
+        # Verify non-nan and non-inf positions
+        for v in self.mesh.verts:
+            if np.any(np.isnan(v.position)) or np.any(np.isinf(v.position)):
+                print("ERROR: Invalid position value at vertex {} = {}".format(str(v),str(v.position)))
+                raise ValueError("ERROR: Invalid (nan or inf) position value")
 
-        return triSoupMesh
 
-    def setMeshColorFromRGB(self, colorAttrName):
+    def setShapeColorToDefault(self):
+        self.colorMethod = 'constant'
+        self.colorDefinedOn = None
+        self.colorAttrName = None
+        self.vMinMax = None
+        self.cmapName = None
+
+    def setShapeColorFromRGB(self, colorAttrName, definedOn='vertex'):
         """Sets the mesh face color from RGB data defined on the vertices"""
 
         self.colorMethod = 'rgbData'
+        self.colorDefinedOn = definedOn
         self.colorAttrName = colorAttrName
-        self.retainVertAttr.append(colorAttrName)
 
-    def setMeshColorFromScalar(self, colorScalarAttr, vMinMax=None, cmapName='OrRd'):
+
+    def setShapeColorFromScalar(self, colorScalarAttr, definedOn='vertex', vMinMax=None, cmapName='OrRd'):
         """
         Sets the mesh vertex color from a scalar field defined on the vertices
           - vMinMax: tuple (min, max) giving the bounds for the scalar color scale (the data min/max are used if None)
@@ -434,25 +426,77 @@ class MeshDisplay(object):
         """
 
         self.colorMethod = 'scalarData'
+        self.colorDefinedOn = definedOn
         self.colorAttrName = colorScalarAttr
-        self.retainVertAttr.append(colorScalarAttr)
         self.vMinMax = vMinMax
         self.cmapName = cmapName
 
-    def setSurfaceDirections(self, vectorAttrName, vectorRefDirAttrName='referenceDirectionR3', nSym=1):
+
+    def setVectors(self, vectorAttrName, vectorDefinedAt='vertex', isTangentVector=False,
+                             vectorRefDirAttrName='referenceDirectionR3', isUnit=False, nSym=1):
         """Draws vectors on the surface of the mesh"""
+        # TODO: Right now we can only draw one type of vector at a time
 
-        self.vectorMethod = 'directionData'
-        self.vectorAttrName = vectorAttrName
-        self.retainVertAttr.append(vectorAttrName)
-        self.vectorRefDirAttrName = vectorRefDirAttrName
-        self.retainVertAttr.append(vectorRefDirAttrName)
-        self.vectorNsym = nSym
+        if vectorAttrName is None:
+            self.vectorAttrName = None
+            self.vectorDefinedAt = None
+            self.vectorIsTangent = None
+            self.vectorRefDirAttrName = None
+            self.vectorIsUnit = None
+            self.vectorNsym = 1
+        else:
+            self.vectorAttrName = vectorAttrName
+            self.vectorDefinedAt = vectorDefinedAt
+            self.vectorIsTangent = isTangentVector
+            self.vectorRefDirAttrName = vectorRefDirAttrName
+            self.vectorIsUnit = isUnit
+            self.vectorNsym = nSym
 
-        self.prepareSurfVecProgram()
+            # Color face and vertex vectors different colors
+            if vectorDefinedAt == 'vertex':
+                self.vectorColor = np.array(self.colors['red'])
+            if vectorDefinedAt == 'face':
+                self.vectorColor = np.array(self.colors['light_blue'])
+
+            # Prepare a vector drawing program if we don't already have one
+            if self.vectorProg is None:
+                self.prepareVectorProgram()
+
+    def prepareToPick(self):
+        """Sets up datastructures needed to pick from the current mesh"""
+
+        # Build forward and reverse lookup tables
+        self.pickArray = [None] + list(self.mesh.verts) +  list(self.mesh.faces) +  list(self.mesh.edges)
+        for i in range(len(self.pickArray)):
+            self.pickInd[self.pickArray[i]] = i
+
+        # Valid that we have enough indices to represent this
+        if len(self.pickArray) > self.PICK_IND_MAX**3:
+            raise("ERROR: Do not have enough indices to support picking on a mesh this large. Pack floats better in picking code")
 
 
-    def readNewMeshValues(self):
+    def pickIndAsFloats(self, obj):
+        """Return the pick index, represented as 3 floats for use as a color"""
+        ind = self.pickInd[obj]
+
+        v1 = ind / (self.PICK_IND_MAX**2)
+        ind -= (self.PICK_IND_MAX**2) * v1
+        v2 = ind / self.PICK_IND_MAX
+        ind -= self.PICK_IND_MAX * v2
+        v3 = ind
+
+        return np.array([v1,v2,v3], dtype=np.float32)/256.0
+
+    def pickResult(self, vals):
+        """Return the object selected by a pick"""
+        ind1 = int(vals[0]*256.0)
+        ind2 = int(vals[1]*256.0)
+        ind3 = int(vals[2]*256.0)
+        ind = ind1*self.PICK_IND_MAX*self.PICK_IND_MAX + ind2*self.PICK_IND_MAX + ind3
+
+        return self.pickArray[ind]
+
+    def generateAllMeshValues(self):
         """
         Updates mesh values in the viewer (meaning positions and possibly colors),
         assuming they have been changed on the mesh reference stored herein.
@@ -462,197 +506,600 @@ class MeshDisplay(object):
         (You may NOT add/remove/modify verts/edges, and this may fail badly)
         """
 
-        # Get the current mesh, converted as needed
-        triSoupMesh = self.currMeshAsSoupWithProperties()
+        ## The data used to generate the image which actually appears onscreen
+        self.generateFaceData()
+        self.generateEdgeData()
+        self.generateVertexData()
 
-        # Compute a general scale factor used to set nice defaults regardless
-        # of the scale of the mesh.
-        self.computeScale(triSoupMesh)
+        if self.vectorAttrName is not None:
+            self.generateVectorData()
 
-        # Vertex positions
-        vertPosData = triSoupMesh.verts.astype(np.float32)
+        ## Extra buffers/shaders used to support picking
+        self.prepareToPick()
+        self.generateFaceData(pick=True)
+        self.generateEdgeData(pick=True)
+        self.generateVertexData(pick=True)
 
-        # Normals
-        triSoupMesh.computeNormals()
-        normData = np.array(triSoupMesh.vertAttr['normal'], dtype=np.float32)
-
-        # Get the color using the appropriate color method (generateColor uses
-        # one of several options internally based on global state)
-        colorData = self.generateColor(triSoupMesh)
-
-        # Face drawing data
-        # Store the vertex position, triangle indices, and normals in the buffers
-        glBindVertexArray(self.shapeProg.vaoHandle['meshVAO'])
-        self.shapeProg.setVBOData('vertPos', vertPosData)
-        self.shapeProg.setVBOData('vertNorm', normData)
-        self.shapeProg.setVBOData('vertColor', colorData)
-
-        # Edge drawing data
-        # Store the vertex position and triangle indices in the buffers
-        glBindVertexArray(self.edgeProg.vaoHandle['meshVAO'])
-        self.edgeProg.setVBOData('vertPos', vertPosData)
-        self.edgeProg.setVBOData('vertNorm', normData)
-
-        # Vertex drawing data
-        glBindVertexArray(self.vertProg.vaoHandle['meshVAO'])
-        self.vertProg.setVBOData('vertPos', vertPosData)
-        self.vertProg.setVBOData('vertNorm', normData)
-        vertexDotColors = self.constantVertexColor(self.colors[self.vertexDotColor])
-        self.vertProg.setVBOData('vertColor', vertexDotColors)
-
-        # Surface vector drawing data, if applicable
-        if self.vectorMethod != 'none':
-            (vecPos, vecNorm, vecColor) = self.generateVertexVectorData(triSoupMesh, nSym = self.vectorNsym)
-            glBindVertexArray(self.surfVecProg.vaoHandle['meshVAO'])
-            self.surfVecProg.setVBOData('vertPos', vecPos)
-            self.surfVecProg.setVBOData('vertNorm', vecNorm)
-            self.surfVecProg.setVBOData('vertColor', vecColor)
-
-
-    def generateColor(self, triSoupMesh):
+    def generateColorscale(self):
         """
-        Generate a color data array for the mesh, either with a constant color,
-        specified vertex colors, or specified vertex scalars + colormap
+        Create a colormap and bounds for coloring from scalar data
         """
 
-        # Apply the constant default color
-        if self.colorMethod == 'constant':
-            colorData = np.tile(self.shapeColor[0:3], (self.nVerts,1))
-
-        # Apply colors directly from an [0,1]^3 value defined at each vertex
-        elif self.colorMethod == 'rgbData':
-            colorData = np.array(triSoupMesh.vertAttr[self.colorAttrName], dtype=np.float32).reshape((self.nVerts,3))
-
-        # Assign colors from a scalar defined over the surface using a colormap
-        elif self.colorMethod == 'scalarData':
-
-            scalarData = np.array(triSoupMesh.vertAttr[self.colorAttrName], dtype=np.float32).reshape((self.nVerts))
-
-            # Make sure we have valid bounds for the data
-            if self.vMinMax is not None:
-                if(self.vMinMax[0] >= self.vMinMax[1]):
-                    raise ValueError("ERROR: min bound must be strictly less than max")
-                vMinMax = self.vMinMax
-            else:
-                vMinMax = [scalarData.min(), scalarData.max()]
-                # Make sure we don't go crazy if the data is a constant
-                scale =  max((abs(vMinMax[0]),abs(vMinMax[1])))
-                if (abs(vMinMax[0] - vMinMax[1]) / scale) < 0.0000001:
-                    print("WARNING: mesh vertex color scalar was nearly constant, adjusting bounds slightly to draw")
-                    vMinMax = [vMinMax[0] - scale*0.01, vMinMax[1] + scale*0.01]
-
-            print("Coloring with scalar data " + str(self.colorAttrName) + " range is " + str(vMinMax[0]) + "  ---  " + str(vMinMax[1]))
-
-            # Remap the data in to [0,1] (if values are outside the range cmap will clamp below)
-            span = vMinMax[1] - vMinMax[0]
-            normalizedData = (scalarData - vMinMax[0]) / span
-
-            # Get color values from the colormap
-            cmap = matplotlib.cm.get_cmap(self.cmapName)
-            colorData = cmap(normalizedData)[:,0:3]
-
+        # Make sure we have valid bounds for the data
+        if self.vMinMax is not None:
+            if(self.vMinMax[0] >= self.vMinMax[1]):
+                raise ValueError("ERROR: min bound must be strictly less than max")
         else:
-            raise ValueError("ERROR: Unrecognized colorMethod: " + str(self.colorMethod))
+
+            vMin = float('inf')
+            vMax = -float('inf')
+            if self.colorDefinedOn == 'vertex':
+                for v in self.mesh.verts:
+                    vMin = min((vMin, getattr(v, self.colorAttrName)))
+                    vMax = max((vMax, getattr(v, self.colorAttrName)))
+            elif self.colorDefinedOn == 'face':
+                for f in self.mesh.faces:
+                    vMin = min((vMin, getattr(f, self.colorAttrName)))
+                    vMax = max((vMax, getattr(f, self.colorAttrName)))
+            elif self.colorDefinedOn == 'edge':
+                raise NotImplementedError("Edge shape color definitions not implemented yet")
+            vMinMax = [vMin, vMax]
+
+            # Make sure we don't go crazy if the data is a constant
+            scale =  max((abs(vMinMax[0]),abs(vMinMax[1])))
+            if (abs(vMinMax[0] - vMinMax[1]) / scale) < 0.0000001:
+                print("WARNING: mesh vertex color scalar was nearly constant, adjusting bounds slightly to draw")
+                vMinMax = [vMinMax[0] - scale*0.01, vMinMax[1] + scale*0.01]
+
+            self.vMinMax = vMinMax
+
+        # Get color values from the colormap
+        self.scalarDataColorMap = matplotlib.cm.get_cmap(self.cmapName)
+
+        # Make a shorthand function for mapping values to colors
+        def mapValueToColor(x):
+            return np.array(self.scalarDataColorMap((x - self.vMinMax[0]) / (self.vMinMax[1]-self.vMinMax[0]))[0:3], dtype=np.float32)
+        self.scalarColorMapper = mapValueToColor
 
 
-        return colorData.astype(np.float32)
+    def generateFaceData(self, pick=False):
+        """Generates the positions, normals, and colors for drawing faces"""
 
-    def constantVertexColor(self, color):
-        """Helper function to create an array reprsenting a constant color at each vertex"""
-        return np.tile(color[0:3], (self.nVerts,1)).astype(np.float32)
+        facePos = np.zeros((3*self.nFaces,3), dtype=np.float32)
+        faceNorm = np.zeros((3*self.nFaces,3), dtype=np.float32)
+        faceColor = np.zeros((3*self.nFaces,3), dtype=np.float32)
 
-    def generateEdges(self, mesh):
-        """Generate an index array for mesh edges from the triangle indices"""
+        # If appropriate, make sure we have a colorscale and map.
+        # Create a shorthand function to map values to colors
+        if self.colorMethod == 'scalarData':
+            self.generateColorscale()
 
-        # NOTE: The i'th edge of the n'th triangle is at index i*nTri + n
-        e1 = mesh.tris[:,0:2]
-        e2 = mesh.tris[:,1:3]
-        e3 = np.vstack((mesh.tris[:,2], mesh.tris[:,0])).T
-        edges = np.vstack((e1,e2,e3))
-        return edges
+        # Iterate through the faces to build arrays
+        for (i, face) in enumerate(self.mesh.faces):
+            v1 = face.anyHalfEdge.vertex
+            v2 = face.anyHalfEdge.next.vertex
+            v3 = face.anyHalfEdge.next.next.vertex
 
-    def generateVertexVectorData(self, triSoupMesh, nSym=1):
-        """Computes data for drawing vectors on the surface, as instructed by setSurfaceDirections()"""
+            facePos[3*i  ,:] = v1.position
+            facePos[3*i+1,:] = v2.position
+            facePos[3*i+2,:] = v3.position
 
-        # TODO the for-loops in here could probably be numpy-ified for a decent speedup
+            faceNorm[3*i  ,:] = v1.normal
+            faceNorm[3*i+1,:] = v2.normal
+            faceNorm[3*i+2,:] = v3.normal
 
-        ## Construct an array filled with the vectors in R3 for each vertex
-        vertLocs = triSoupMesh.verts
-        tris = triSoupMesh.tris
-        normals = triSoupMesh.vertAttr['normal']
-        refDirs = triSoupMesh.vertAttr[self.vectorRefDirAttrName]
-        angles = triSoupMesh.vertAttr[self.vectorAttrName]
+            # Select the appropriate color from the many possibile ways the
+            # mesh could be colored
+            if pick:
+                faceIndAsFloats = self.pickIndAsFloats(face)
+                faceColor[3*i,  :] = faceIndAsFloats
+                faceColor[3*i+1,:] = faceIndAsFloats
+                faceColor[3*i+2,:] = faceIndAsFloats
+            else:
+                if self.colorMethod == 'constant':
+                    faceColor[3*i,  :] = self.shapeColor[0:3]
+                    faceColor[3*i+1,:] = self.shapeColor[0:3]
+                    faceColor[3*i+2,:] = self.shapeColor[0:3]
 
-        # Compute a reasonable length for the direction vectors
-        # 0.4 * (The 80'th percentile of edge lengths when edges are sorted)
-        percentile = 0.80
-        edgeLens = []
-        for i in range(vertLocs.shape[0]):
-            for j in range(3):
-                v0 = vertLocs[tris[i,j]]
-                v1 = vertLocs[tris[i,(j+1)%3]]
-                edgeLens.append(norm(v1-v0))
-        edgeLens.sort()
-        coef = 0.4 if nSym == 1 else 0.2 # lines should be shorter if we're drawing >1 per vertex
-        unitLength = coef*edgeLens[int(round(len(edgeLens)*percentile))]
+                elif self.colorMethod == 'rgbData':
+                    if self.colorDefinedOn == 'vertex':
+                        faceColor[3*i,  :] = getattr(v1, self.colorAttrName)
+                        faceColor[3*i+1,:] = getattr(v2, self.colorAttrName)
+                        faceColor[3*i+2,:] = getattr(v3, self.colorAttrName)
+                    elif self.colorDefinedOn == 'face':
+                        faceColor[3*i,  :] = getattr(face, self.colorAttrName)
+                        faceColor[3*i+1,:] = getattr(face, self.colorAttrName)
+                        faceColor[3*i+2,:] = getattr(face, self.colorAttrName)
+                    elif self.colorDefinedOn == 'edge':
+                        raise NotImplementedError("Edge shape color definitions not implemented yet")
 
-        # Compute the rotation increment and size to support symmetry
-        rotInc = 2.0 * pi / nSym
-        nTotalVector = vertLocs.shape[0] * nSym
-
-        # TODO do rotation with euclid for now until I get around to implementing
-        # with numpy
-        vertVec = np.zeros((nTotalVector,3))
-        for i in range(vertLocs.shape[0]):
-            for iRot in range(nSym):
-                normal = eu.Vector3(*normals[i,:])
-                refDir = eu.Vector3(*refDirs[i,:])
-                vecDir = refDir.rotate_around(normal, angles[i] + rotInc * iRot)
-                vertVec[nSym*i + iRot,:] = vecDir
-
-        # Give all of the vectors length unitLength
-        vertVec = normalize(vertVec) * unitLength
-
-        # Interleave the vertices and the (vertices + direction) to get the final
-        # answer
-        vertVecDraw = np.zeros((2*nTotalVector,3))
-        for i in range(vertLocs.shape[0]):
-            for iRot in range(nSym):
-                vertVecDraw[2*(nSym*i + iRot),:] = vertLocs[i,:]
-                vertVecDraw[2*(nSym*i + iRot) + 1,:] = vertLocs[i,:] + vertVec[i*nSym+iRot,:]
+                elif self.colorMethod == 'scalarData':
+                    if self.colorDefinedOn == 'vertex':
+                        faceColor[3*i,  :] = self.scalarColorMapper(getattr(v1, self.colorAttrName))
+                        faceColor[3*i+1,:] = self.scalarColorMapper(getattr(v2, self.colorAttrName))
+                        faceColor[3*i+2,:] = self.scalarColorMapper(getattr(v3, self.colorAttrName))
+                    elif self.colorDefinedOn == 'face':
+                        faceColor[3*i,  :] = self.scalarColorMapper(getattr(face, self.colorAttrName))
+                        faceColor[3*i+1,:] = self.scalarColorMapper(getattr(face, self.colorAttrName))
+                        faceColor[3*i+2,:] = self.scalarColorMapper(getattr(face, self.colorAttrName))
+                    elif self.colorDefinedOn == 'edge':
+                        raise NotImplementedError("Edge shape color definitions not implemented yet")
 
 
-        self.nVector = nTotalVector
-        self.nVectorVerts = nTotalVector*2
+        # Make edges face both ways
+        facePos, faceNorm, faceColor = self.expandTrianglesToFaceBothWays(facePos, faceNorm, faceColor)
 
-        # Normals need to align
-        vertVecDrawNormals = np.zeros((2*nTotalVector,3))
-        for i in range(vertLocs.shape[0]):
-            for iRot in range(nSym):
-                vertVecDrawNormals[2*(nSym*i + iRot),:] = normals[i,:]
-                vertVecDrawNormals[2*(nSym*i + iRot) + 1,:] = normals[i,:]
+        self.nShapeVerts = facePos.shape[0]
 
-        # Constant colors
-        vertVecDrawColors = np.tile(self.vectorColor, (self.nVectorVerts,1))
+        # Store this new data in the buffers
+        if pick:
+            glBindVertexArray(self.shapePickProg.vaoHandle['meshVAO'])
+            self.shapePickProg.setVBOData('vertPos', facePos)
+            self.shapePickProg.setVBOData('vertColor', faceColor)
+        else:
+            glBindVertexArray(self.shapeProg.vaoHandle['meshVAO'])
+            self.shapeProg.setVBOData('vertPos', facePos)
+            self.shapeProg.setVBOData('vertNorm', faceNorm)
+            self.shapeProg.setVBOData('vertColor', faceColor)
 
-        return (vertVecDraw.astype(np.float32), vertVecDrawNormals.astype(np.float32), vertVecDrawColors.astype(np.float32))
+
+    def generateEdgeData(self, pick=False):
+        """Generates the positions, normals, and colors for drawing edges"""
+
+        edgePos = np.zeros((2*self.nEdges,3), dtype=np.float32)
+        edgeNorm = np.zeros((2*self.nEdges,3), dtype=np.float32)
+        edgeColor = np.zeros((2*self.nEdges,3), dtype=np.float32)
+
+        for (i, edge) in enumerate(self.mesh.edges):
+            v1 = edge.anyHalfEdge.vertex
+            v2 = edge.anyHalfEdge.twin.vertex
+
+            edgePos[2*i,:] = v1.position
+            edgePos[2*i+1,:] = v2.position
+
+            edgeNorm[2*i,  :] = v1.normal
+            edgeNorm[2*i+1,:] = v2.normal
+
+            if pick:
+                edgeIndAsFloats = self.pickIndAsFloats(edge)
+                edgeColor[2*i,  :] = edgeIndAsFloats
+                edgeColor[2*i+1,:] = edgeIndAsFloats
+            else:
+                edgeColor[2*i,  :] = self.edgeColor
+                edgeColor[2*i+1,:] = self.edgeColor
 
 
-    def computeScale(self, mesh):
+        # Expand the lines to strips (uncomment alternate verions to scale lines by line length)
+        if pick:
+            # stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor, lineWidthCoef=3*self.lineWidthCoef)
+            stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor,
+                                                lineWidth=3*self.lineWidthScaleCoef*self.medianEdgeLength, relativeWidths=False)
+        else:
+            # stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor, lineWidthCoef=self.lineWidthCoef)
+            stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor,
+                                                lineWidth=self.lineWidthScaleCoef*self.medianEdgeLength, relativeWidths=False)
+
+        # If we're looking at a wireframe, we need a second set of triangles so
+        # we get visibility in both directions
+        if not self.drawShape:
+            stripPos, stripNorm, stripColor = self.expandTrianglesToFaceBothWays(stripPos, stripNorm, stripColor)
+
+        # Store this new data in the buffers
+        if pick:
+            glBindVertexArray(self.edgePickProg.vaoHandle['meshVAO'])
+            self.edgePickProg.setVBOData('vertPos', stripPos)
+            self.edgePickProg.setVBOData('vertColor', stripColor)
+        else:
+            glBindVertexArray(self.edgeProg.vaoHandle['meshVAO'])
+            self.edgeProg.setVBOData('vertPos', stripPos)
+            self.edgeProg.setVBOData('vertNorm', stripNorm)
+            self.edgeProg.setVBOData('vertColor', stripColor)
+
+
+    def generateVertexData(self, pick=False):
+        """Generates the positions, normals, and colors for drawing verts"""
+
+        vertPos = np.zeros((self.nVerts,3), dtype=np.float32)
+        vertNorm = np.zeros((self.nVerts,3), dtype=np.float32)
+        vertColor = np.zeros((self.nVerts,3), dtype=np.float32)
+
+        # Iterate through the vertices to fill arrays
+        for (i, vert) in enumerate(self.mesh.verts):
+
+            vertPos[i,:] = vert.position
+            vertNorm[i,:] = vert.normal
+            if pick:
+                vertColor[i,:] = self.pickIndAsFloats(vert)
+            else:
+                vertColor[i,:] = self.edgeColor
+
+        diskPos, diskNorm, diskColor = self.expandDotsToDisks(vertPos, vertNorm, vertColor, dotWidthCoef=self.lineWidthScaleCoef)
+
+        # If we're looking at a wireframe, we need a second set of triangles so
+        # we get visibility in both directions
+        if not self.drawShape:
+            diskPos, diskNorm, diskColor = self.expandTrianglesToFaceBothWays(diskPos, diskNorm, diskColor)
+
+        # Store this new data in the buffers
+        if pick:
+            glBindVertexArray(self.vertPickProg.vaoHandle['meshVAO'])
+            self.vertPickProg.setVBOData('vertPos', diskPos)
+            self.vertPickProg.setVBOData('vertColor', diskColor)
+        else:
+            glBindVertexArray(self.vertProg.vaoHandle['meshVAO'])
+            self.vertProg.setVBOData('vertPos', diskPos)
+            self.vertProg.setVBOData('vertNorm', diskNorm)
+            self.vertProg.setVBOData('vertColor', diskColor)
+
+
+    def generateVectorData(self):
+        """Computes data for drawing vectors on the mesh, as instructed by setSurfaceDirections()"""
+
+        # Clear out if we're not currently looking at anything
+        if self.vectorAttrName is None:
+            self.nVectorVerts = 0
+            return
+
+        # Generate vector starts and ends for vectors in the tangent space
+        if self.vectorIsTangent:
+
+            # We only support vertex-defined directions here at the moment (TODO)
+            if not self.vectorDefinedAt == 'vertex':
+                raise ValueError("Vectors in the tangent space must be defined at vertices")
+            if not self.vectorIsUnit:
+                raise ValueError("Vectors in the tangent space must be interpreted as unit vectors")
+
+            nSym = self.vectorNsym
+            nTotalVector = self.nVerts * nSym
+            vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
+            vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
+
+            # Compute a reasonable length for the direction vectors
+            # TODO make this vary by vertex
+            coef = 0.4 if nSym == 1 else 0.2 # lines should be shorter if we're drawing >1 per vertex
+            unitVectorLength = coef*self.medianEdgeLength
+
+            # Rotation increment for symmetric vectors
+            rotInc = 2.0 * pi / nSym
+
+            # Iterate over the vertices to fill the arrays
+            for (iVert, vert) in enumerate(self.mesh.verts):
+                for iRot in range(nSym):
+
+                    # The base point
+                    vecStart[(nSym*iVert + iRot),:] = vert.position
+
+                    # The draw-to point
+                    theta = getattr(vert, self.vectorAttrName)
+                    refDir = eu.Vector3(*getattr(vert, self.vectorRefDirAttrName))
+                    vecDir = np.array(refDir.rotate_around(eu.Vector3(*vert.normal), theta + rotInc * iRot), dtype=np.float32)
+                    vecEnd[(nSym*iVert + iRot),:] = vert.position + normalize(vecDir) * unitVectorLength
+
+        # Generate vectors in R3
+        else:
+
+            # Warn if you try to use nSym other than 1 for now
+            if self.vectorNsym != 1:
+                raise ValueError("Symmetry not yet supported for vectors in R3")
+
+            # Build an array from data stored on vertices
+            if self.vectorDefinedAt == 'vertex':
+                nTotalVector = self.nVerts
+                vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
+                vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
+
+                for (iVert, vert) in enumerate(self.mesh.verts):
+                    vecStart[iVert,:] = vert.position
+                    vecEnd[iVert,:] = vert.position + getattr(vert, self.vectorAttrName)
+
+            # Build an array from data stored on faces
+            elif self.vectorDefinedAt == 'face':
+                nTotalVector = self.nFaces
+                vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
+                vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
+
+                for (iFace, face) in enumerate(self.mesh.faces):
+                    vecStart[iFace,:] = face.center
+                    vecEnd[iFace,:] = face.center + getattr(face, self.vectorAttrName)
+
+            else:
+                print("ERROR: Unrecognized value for vectorDefinedAt: " + str(self.vectorDefinedAt))
+                print("       Should be one of 'vertex', 'face'")
+                raise ValueError("ERROR: Unrecognized value for vectorDefinedAt: " + str(self.vectorDefinedAt))
+
+
+            # Rescale the vectors to a reasonable length
+            vec = vecEnd - vecStart
+            maxLen = np.max(norm(vec, axis=1))
+            vectorLen = 0.8 * self.medianEdgeLength
+            scaleFactor = vectorLen / maxLen
+            vecEnd = vecStart + (vecEnd - vecStart)*scaleFactor # kind of redundant way to do this...
+
+
+        # Expand the vectors in to prisms that look nice
+        coef = 0.8 if self.vectorIsTangent else 0.8
+        vertVecPos, vertVecNorm, vertVecColor = self.expandVectors(vecStart, vecEnd, coef*self.lineWidthScaleCoef*self.medianEdgeLength)
+
+        # Size of the ultimate buffer containing this vector data
+        self.nVectorVerts = vertVecPos.shape[0]
+
+        glBindVertexArray(self.vectorProg.vaoHandle['meshVAO'])
+        self.vectorProg.setVBOData('vertPos', vertVecPos)
+        self.vectorProg.setVBOData('vertNorm', vertVecNorm)
+        self.vectorProg.setVBOData('vertColor', vertVecColor)
+
+
+    def expandLinesToStrips(self, linePos, lineNorm, lineColor, lineWidth, relativeWidths=True):
+        """
+        Some platforms (*cough* OSX *cough*) don't support setting linewidth. This function
+        takes what would be input to GL_LINES and transforms it to GL_TRIANGLES input as line strips
+
+        If relativeWidths=True, the line widths are set as a fraction of the line's lenght. Otherwise
+        the widths are a constant factor of the shape's scale.
+        """
+        # TODO this is exactly what geometry shaders are meant for
+
+        # Allocate new arrays
+        nLines = linePos.shape[0]/2
+        stripPos = np.zeros((nLines*6,3), dtype=np.float32)
+        stripNorm = np.zeros((nLines*6,3), dtype=np.float32)
+        stripColor = np.zeros((nLines*6,3), dtype=np.float32)
+
+        # Directions which will be used in construction
+        forwardVec = linePos[1:2*nLines:2,:] - linePos[0:2*nLines:2,:]  # Vector from i-->j along each line
+        crossI = np.cross(forwardVec, lineNorm[0:2*nLines:2,:])         # The vector for the width of the strip at i
+        crossJ = np.cross(forwardVec, lineNorm[1:2*nLines:2,:])         # The vector for the width of the strip at j
+
+        if relativeWidths:
+            # The widths for each line are a factor of the lenght the line
+            lineWidth = 0.1 * norm(forwardVec, axis=1)
+            crossI = (normalize(crossI).T*lineWidth/2.0).T
+            crossJ = (normalize(crossJ).T*lineWidth/2.0).T
+        else:
+            crossI = normalize(crossI)*lineWidth/2.0
+            crossJ = normalize(crossJ)*lineWidth/2.0
+
+        # Generate the 4 points which will make up triangles for each line
+        v0 = linePos[0:2*nLines:2,:] + crossI
+        v1 = linePos[0:2*nLines:2,:] - crossI
+        v2 = linePos[1:2*nLines:2,:] + crossJ
+        v3 = linePos[1:2*nLines:2,:] - crossJ
+
+        # The two triangles are (v0,v2,v3) and (v0,v3,v1)
+        stripPos[0:6*nLines:6,:] = v0
+        stripPos[1:6*nLines:6,:] = v2
+        stripPos[2:6*nLines:6,:] = v3
+        stripPos[3:6*nLines:6,:] = v0
+        stripPos[4:6*nLines:6,:] = v3
+        stripPos[5:6*nLines:6,:] = v1
+
+        ## Assign normals and colors to match
+        stripNorm[0:6*nLines:6,:] = lineNorm[0:2*nLines:2,:]
+        stripNorm[1:6*nLines:6,:] = lineNorm[1:2*nLines:2,:]
+        stripNorm[2:6*nLines:6,:] = lineNorm[1:2*nLines:2,:]
+        stripNorm[3:6*nLines:6,:] = lineNorm[0:2*nLines:2,:]
+        stripNorm[4:6*nLines:6,:] = lineNorm[1:2*nLines:2,:]
+        stripNorm[5:6*nLines:6,:] = lineNorm[0:2*nLines:2,:]
+
+        stripColor[0:6*nLines:6,:] = lineColor[0:2*nLines:2,:]
+        stripColor[1:6*nLines:6,:] = lineColor[1:2*nLines:2,:]
+        stripColor[2:6*nLines:6,:] = lineColor[1:2*nLines:2,:]
+        stripColor[3:6*nLines:6,:] = lineColor[0:2*nLines:2,:]
+        stripColor[4:6*nLines:6,:] = lineColor[1:2*nLines:2,:]
+        stripColor[5:6*nLines:6,:] = lineColor[0:2*nLines:2,:]
+
+        return stripPos, stripNorm, stripColor
+
+    def expandDotsToDisks(self, dotPos, dotNorm, dotColor, dotWidthCoef=None):
+        """
+        To fit well with expandLinesToStrips(), drawing ugly square points is probably
+        not sufficient. Use this to expand points to disks
+        """
+        # TODO this is exactly what geometry shaders are meant for
+
+        # Size of radial points for each disk
+        nRad = self.nRadialPoints
+        dotRad = 2 * dotWidthCoef * self.medianEdgeLength
+
+        # Allocate new arrays
+        nDots = dotPos.shape[0]
+        diskPos = np.zeros((nDots*nRad*3,3), dtype=np.float32)
+        diskNorm = np.zeros((nDots*nRad*3,3), dtype=np.float32)
+        diskColor = np.zeros((nDots*nRad*3,3), dtype=np.float32)
+
+        # We need to pick an arbitrary x direction in the tangent space of each
+        # vertex. However, if the code were to use any fixed direction and that happened
+        # to be exactly the normal direction for the vertex, things would break.
+        # Using a random vector is almost definitely safe.
+        randDir = (2*np.random.rand(3) - np.array([1.0,1.0,1.0])).astype(np.float32)
+
+        # Generate basis vectors at each vertex
+        xDir = normalize(np.cross(dotNorm, randDir))*dotRad
+        yDir = normalize(np.cross(dotNorm, xDir))*dotRad
+
+        # Walk around a circle placing the points that make up each triangle
+        for rotInc in range(nRad):
+
+            theta = (2*pi*rotInc) / nRad
+            cTheta = cos(theta)
+            sTheta = sin(theta)
+            thetaNext = (2*pi*(rotInc+1)) / nRad
+            cThetaNext = cos(thetaNext)
+            sThetaNext = sin(thetaNext)
+
+            # Centerpoint
+            diskPos  [3*rotInc:nDots*nRad*3:nRad*3,:] = dotPos
+            diskNorm [3*rotInc:nDots*nRad*3:nRad*3,:] = dotNorm
+            diskColor[3*rotInc:nDots*nRad*3:nRad*3,:] = dotColor
+
+            # theta
+            diskPos  [3*rotInc+1:nDots*nRad*3:nRad*3,:] = dotPos + cTheta*xDir + sTheta*yDir
+            diskNorm [3*rotInc+1:nDots*nRad*3:nRad*3,:] = dotNorm
+            diskColor[3*rotInc+1:nDots*nRad*3:nRad*3,:] = dotColor
+
+            # thetaNext
+            diskPos  [3*rotInc+2:nDots*nRad*3:nRad*3,:] = dotPos + cThetaNext*xDir + sThetaNext*yDir
+            diskNorm [3*rotInc+2:nDots*nRad*3:nRad*3,:] = dotNorm
+            diskColor[3*rotInc+2:nDots*nRad*3:nRad*3,:] = dotColor
+
+        return diskPos, diskNorm, diskColor
+
+    def expandTrianglesToFaceBothWays(self, triPos, triNorm, triColor):
+        """
+        OpenGL only emits a triangle if it wound in the proper direction, which
+        means you cannot see a triangle "from beind". This duplicates a triangle,
+        creating a new array including dual triangles wound in the opposite direciton.
+        Normals for these new triangles are zeroed, which gives a nice darkened
+        effect for viewing from behind.
+        """
+
+        triPosRev = np.zeros_like(triPos)
+        triPosRev[0:triPosRev.shape[0]:3,:] = triPos[1:triPos.shape[0]:3,:]
+        triPosRev[1:triPosRev.shape[0]:3,:] = triPos[0:triPos.shape[0]:3,:]
+        triPosRev[2:triPosRev.shape[0]:3,:] = triPos[2:triPos.shape[0]:3,:]
+        doubleTriPos = np.vstack((triPos, triPosRev))
+
+        triNormRev = np.zeros_like(triNorm)
+        triNormRev[0:triNormRev.shape[0]:3,:] = triNorm[1:triNorm.shape[0]:3,:]
+        triNormRev[1:triNormRev.shape[0]:3,:] = triNorm[0:triNorm.shape[0]:3,:]
+        triNormRev[2:triNormRev.shape[0]:3,:] = triNorm[2:triNorm.shape[0]:3,:]
+        doubleTriNorm = np.vstack((triNorm, -triNormRev))
+
+        doubleTriColor = np.vstack((triColor, triColor))
+
+        return doubleTriPos, doubleTriNorm, doubleTriColor
+
+
+    def expandVectors(self, vecStarts, vecEnds, vectorRadius, drawTips=True):
+        """Geneate data for vectors R3 by specifying the start and end of each vector"""
+
+        kPrism = self.kVectorPrism
+        nVec = vecStarts.shape[0]
+        nLines = kPrism*nVec
+
+        linePos = np.zeros((2*nLines,3), dtype=np.float32)
+        lineNorm = np.zeros((2*nLines,3), dtype=np.float32)
+        lineColor = np.zeros((2*nLines,3), dtype=np.float32)
+
+        if drawTips:
+            tipPos = np.zeros((3*nLines,3), dtype=np.float32)
+            tipNorm = np.zeros((3*nLines,3), dtype=np.float32)
+            tipColor = np.zeros((3*nLines,3), dtype=np.float32)
+
+        # We are going to build a k-prism around each vector.
+        # First, generate the 4 lines that are the axes of the walls of this
+        # prism. Then, expand each of those lines to a strip.
+
+        # We need to pick an arbitrary x direction prependicular each
+        # vector. However, if the code were to use any fixed direction and that happened
+        # to be exactly the normal direction for the vertex, things would break.
+        # Using a random vector is almost definitely safe.
+        randDir = (2*np.random.rand(3) - np.array([1.0,1.0,1.0])).astype(np.float32)
+
+        # Generate basis vectors at each vector base
+        vecs = normalize(vecEnds - vecStarts)
+        xDir = normalize(np.cross(vecs, randDir))
+        yDir = normalize(np.cross(vecs, xDir))
+
+        if drawTips:
+            tipHeight = 2.5 * vectorRadius
+
+        # Walk around a circle placing the walls of the prism
+        for rotInc in range(kPrism):
+
+            theta = (2*pi*rotInc) / kPrism
+            cTheta = cos(theta)
+            sTheta = sin(theta)
+
+            # Vector begin
+            linePos[2*rotInc:2*nLines:2*kPrism,:] = vecStarts + (cTheta*xDir + sTheta*yDir) * vectorRadius
+            lineNorm[2*rotInc:2*nLines:2*kPrism,:] = cTheta*xDir + sTheta*yDir
+            lineColor[2*rotInc:2*nLines:2*kPrism,:] = self.vectorColor
+
+            # Vector end
+            linePos[2*rotInc+1:2*nLines:2*kPrism,:] = vecEnds + (cTheta*xDir + sTheta*yDir) * vectorRadius
+            lineNorm[2*rotInc+1:2*nLines:2*kPrism,:] = cTheta*xDir + sTheta*yDir
+            lineColor[2*rotInc+1:2*nLines:2*kPrism,:] = self.vectorColor
+
+
+            # Generate triangles in a cone around the tip
+            if drawTips:
+
+                # Side length is slightly different than below
+                # (see http://mathworld.wolfram.com/RegularPolygon.html)
+                tipDist = vectorRadius * 1/cos(pi / kPrism)
+
+                theta = (2*pi*(rotInc+0.5)) / kPrism
+                cTheta = cos(theta)
+                sTheta = sin(theta)
+
+                thetaNext = (2*pi*(rotInc+1.5)) / kPrism
+                cThetaNext = cos(thetaNext)
+                sThetaNext = sin(thetaNext)
+
+                # NOTE these normal are actually wrong, not sure it matters though
+                # (the tip triangle inherits the normal from the prism strip it attaches to,
+                # rather than getting its own correct normal)
+                normals = (cTheta + cThetaNext)*xDir + (sTheta + sThetaNext)*yDir
+
+                # First base point
+                tipPos[3*rotInc:3*nLines:3*kPrism,:] = vecEnds + (cTheta*xDir + sTheta*yDir) * tipDist
+                tipNorm[3*rotInc:3*nLines:3*kPrism,:] = normals
+                tipColor[3*rotInc:3*nLines:3*kPrism,:] = self.vectorColor
+
+                # Second base point
+                tipPos[3*rotInc+1:3*nLines:3*kPrism,:] = vecEnds + (cThetaNext*xDir + sThetaNext*yDir) * tipDist
+                tipNorm[3*rotInc+1:3*nLines:3*kPrism,:] = normals
+                tipColor[3*rotInc+1:3*nLines:3*kPrism,:] = self.vectorColor
+
+                # Second base point
+                tipPos[3*rotInc+2:3*nLines:3*kPrism,:] = vecEnds + vecs * tipHeight
+                tipNorm[3*rotInc+2:3*nLines:3*kPrism,:] = normals
+                tipColor[3*rotInc+2:3*nLines:3*kPrism,:] = self.vectorColor
+
+
+        # Expand the lines we just constructed in to strips which will form the
+        # walls of the vector
+        # (see http://mathworld.wolfram.com/RegularPolygon.html)
+        sideLen = 2*vectorRadius*tan(pi / kPrism) # formula for side length of a regular polygon
+        stripPos, stripNorm, stripColor = self.expandLinesToStrips(linePos, lineNorm, lineColor, sideLen, relativeWidths=False)
+
+        # Append the tips
+        if drawTips:
+            stripPos = np.vstack((stripPos, tipPos))
+            stripNorm = np.vstack((stripNorm, tipNorm))
+            stripColor = np.vstack((stripColor, tipColor))
+
+        return stripPos, stripNorm, stripColor
+
+    def computeScale(self):
         """
         Compute scale factors and translations so that we get a good default view
         no matter what the scale or translation of the vertex data is
         """
 
+        # Find bounds
+        bboxMax = np.array([-float('inf'),-float('inf'),-float('inf')])
+        bboxMin = np.array([float('inf'),float('inf'),float('inf')])
+
+        for v in self.mesh.verts:
+            for i in range(3):
+                bboxMax[i] = max((bboxMax[i], v.position[i]))
+                bboxMin[i] = min((bboxMin[i], v.position[i]))
+
         # Center of the mesh
-        bboxMax = np.amax(mesh.verts,0)
-        bboxMin = np.amin(mesh.verts,0)
         bboxCent = 0.5 * (bboxMax + bboxMin)
         self.dataCenter = bboxCent
 
         # Scale factor
         size = max((bboxMax - bboxMin))
         self.scaleFactor = size
+
+
+        # Compute the median edge length
+        lengths = sorted([norm(e.anyHalfEdge.vector) for e in self.mesh.edges])
+        self.medianEdgeLength = lengths[(len(lengths)*9)/10]
+
 
 
     def redraw(self):
@@ -664,37 +1111,50 @@ class MeshDisplay(object):
 
         # Set the camera view data
         for p in self.meshPrograms: p.setUniform('viewMatrix', self.camera.viewMat())
+        for p in self.meshPickPrograms: p.setUniform('viewMatrix', self.camera.viewMat())
         for p in self.meshPrograms: p.setUniform('projMatrix', self.camera.projMat())
+        for p in self.meshPickPrograms: p.setUniform('projMatrix', self.camera.projMat())
 
         # Set a data translation
         for p in self.meshPrograms: p.setUniform('dataCenter', self.dataCenter)
+        for p in self.meshPickPrograms: p.setUniform('dataCenter', self.dataCenter)
 
         # Set color and transparency uniforms
+
+        # The edges of the mesh should be dark if the surface is being drawn,
+        # but light otherwise. If the current color setting is wrong, update
+        # the setting and fill the buffers with new data.
+        if self.drawEdges and self.drawShape and np.all(self.edgeColor == self.edgeColorLight):
+            self.edgeColor = self.edgeColorDark
+            self.generateEdgeData()
+            self.generateVertexData()
+        if self.drawEdges and not self.drawShape and np.all(self.edgeColor == self.edgeColorDark):
+            self.edgeColor = self.edgeColorLight
+            self.generateEdgeData()
+            self.generateVertexData()
+
         self.shapeProg.setUniform('alpha', self.shapeAlpha)
-        if self.drawShape:  # Switch to a dark color as needed to contrast dark background
-            self.edgeProg.setUniform('color', self.edgeColorDark)
-        else:
-            self.edgeProg.setUniform('color', self.edgeColorLight)
         self.edgeProg.setUniform('alpha', self.edgeAlpha)
 
         # Set up camera and light position in world space, for the shaders that
         # want it
         cameraPos = self.camera.getPos()
-        upDir = self.camera.getUp()
 
         # Light is above the camera
-        # lightLoc = (1.7*cameraPos + 0.3*normalize(upDir)*np.linalg.norm(cameraPos)).astype(np.float32)
         lightLoc = 300*cameraPos # TODO this 300 constant is _probably_ not an ideal solution...
         for p in self.meshPrograms: p.setUniform('eyeLoc', cameraPos)
         for p in self.meshPrograms: p.setUniform('lightLoc', lightLoc)
 
         # Set a depth offset to prevent z-fighting while drawing edges on top
         # of the mesh
+        self.shapeProg.setUniform('depthOffset', 0.0)
+        self.shapePickProg.setUniform('depthOffset', 0.0)
         self.edgeProg.setUniform('depthOffset', 0.0001 * self.scaleFactor)
-        if self.surfVecProg is not None:
-            self.surfVecProg.setUniform('depthOffset', 0.0003 * self.scaleFactor)
-        if self.vertProg is not None:
-            self.vertProg.setUniform('depthOffset', 0.0005 * self.scaleFactor)
+        self.edgePickProg.setUniform('depthOffset', 0.0001 * self.scaleFactor)
+        self.vertProg.setUniform('depthOffset', 0.0005 * self.scaleFactor)
+        self.vertPickProg.setUniform('depthOffset', 0.0005 * self.scaleFactor)
+        if self.vectorProg is not None:
+            self.vectorProg.setUniform('depthOffset', 0.0003 * self.scaleFactor)
 
 
         # Draw the mesh
@@ -702,12 +1162,64 @@ class MeshDisplay(object):
             self.edgeProg.draw()
         if self.drawShape:
             self.shapeProg.draw()
-        if self.vectorMethod != 'none' and self.drawVectors:
-            self.surfVecProg.draw()
-        if self.drawVertices and self.vertProg is not None:
+        if self.vectorAttrName is not None and self.drawVectors:
+            self.vectorProg.draw()
+        if self.drawVertices:
             self.vertProg.draw()
 
+        ## Uncomment to draw the pick buffer for debugging
+        # glClearColor(*(np.append(self.colors['black'],[0.0])).astype(np.float32))
+        # glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        # if self.drawEdges:
+        #     self.edgePickProg.draw()
+        # if self.drawShape:
+        #     self.shapePickProg.draw()
+        # if self.drawVertices:
+        #     self.vertPickProg.draw()
+
         glutSwapBuffers()
+
+    def pick(self, x, y):
+        """
+        Pick at the specified coordinates and call the appropriate callback if
+        the pick'd location corresponds to a face/edge/vertex. This uses an
+        openGL render pass which renders IDs a pixel colors, followed by reading
+        the pixel value.
+        """
+
+        # Draw to the pick buffer
+        glClearColor(*(np.append(self.colors['black'],[0.0])).astype(np.float32))
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        if self.drawShape:
+            self.shapePickProg.draw()
+        if self.drawEdges:
+            self.edgePickProg.draw()
+        if self.drawVertices or self.drawEdges:
+            self.vertPickProg.draw()
+        glFinish() # make sure everything was actually drawn
+
+        # OpenGL uses a different screen coordinate system than GLUT here
+        bufferX = x
+        bufferY = self.windowHeight - y - 1
+
+        # Read the value of the pixel at the pick location and look up the object
+        res = glReadPixelsf(bufferX, bufferY, 1, 1, GL_RGB)[0,0]
+        pickObject = self.pickResult(res)
+
+        if pickObject is None:
+            return
+
+        ## Take action on the pick
+        print("\nPick: " + str(pickObject))
+
+        # Call the appropriate callback
+        if type(pickObject) is Vertex and self.pickVertexCallback is not None:
+            self.pickVertexCallback(pickObject)
+        elif type(pickObject) is Edge and self.pickEdgeCallback is not None:
+            self.pickEdgeCallback(pickObject)
+        elif type(pickObject) is Face and self.pickFaceCallback is not None:
+            self.pickFaceCallback(pickObject)
+
 
     def initGL(self):
         """Initialize openGL"""
@@ -731,7 +1243,7 @@ class MeshDisplay(object):
             glEnable(GL_LINE_SMOOTH)
         # glHint(GL_LINE_SMOOTH_HINT, GL_FASTEST);
 
-        glLineWidth(self.lineWidth)
+        glLineWidth(1.0)
 
     def initGLUT(self):
         """Initialize glut"""
@@ -768,7 +1280,7 @@ class MeshDisplay(object):
 
         # This reads values from the mesh and stores them in buffers. Do it here
         # so the ordering for setup calls doesn't matter
-        self.readNewMeshValues()
+        self.generateAllMeshValues()
 
         glutMainLoop()
 
@@ -788,12 +1300,18 @@ class MeshDisplay(object):
         else:
             self.camera.processMouse(button, state, x, y, shiftHeld)
 
+        # Check for a pick (click without drag using left button)
+        if button == GLUT_LEFT_BUTTON:
+            if state == GLUT_DOWN:
+                self.lastClickPos = (x,y)
+            elif state == GLUT_UP and self.lastClickPos == (x,y):
+                self.pick(x,y)
 
         glutPostRedisplay()
 
     def keyfunc(self, key, x, y):
         """Keyboard callback"""
-        if key == chr(27): # escape key
+        if key == chr(27) or key == 'q': # escape key
             exit(0)
         if key == 'm':
             self.drawEdges = not self.drawEdges
@@ -834,7 +1352,7 @@ class MeshDisplay(object):
 
         print("\n\n==== Keyboard controls ====\n")
         print("== Viewer commands")
-        print("esc   ----  Exit the viewer")
+        print("esc/q ----  Exit the viewer")
         print("wasd  ----  Pan the current view (also shift-mousedrag)")
         print("r     ----  Zoom the view in")
         print("f     ----  Zoom the view out")
@@ -846,7 +1364,7 @@ class MeshDisplay(object):
 
         if len(self.userKeyCallbacks) > 0:
             print("\n== Application commands")
-            for key in self.userKeyCallbacks:
+            for key in sorted(self.userKeyCallbacks):
                 print(key+"     ----  "+self.userKeyCallbacks[key][1])
 
         print("\n")
@@ -899,7 +1417,6 @@ class ShaderProgram(object):
         ## Create the shader program
         vertShader = glCreateShader(GL_VERTEX_SHADER)
         fragShader = glCreateShader(GL_FRAGMENT_SHADER)
-        # geomShader = glCreateShader(GL_GEOMETRY_SHADER)
 
         glShaderSource(vertShader, readFile(vertShaderFile))
         glShaderSource(fragShader, readFile(fragShaderFile))
@@ -907,14 +1424,12 @@ class ShaderProgram(object):
         # Compile the vertex shader
         glCompileShader(vertShader);
         result = glGetShaderiv(vertShader, GL_COMPILE_STATUS)
-        # print("Compile status: " + str(result))
         if not(result):
             raise RuntimeError(glGetShaderInfoLog(vertShader))
 
         # Compile the fragment shader
         glCompileShader(fragShader);
         result = glGetShaderiv(fragShader, GL_COMPILE_STATUS)
-        # print("Compile status: " + str(result))
         if not(result):
             raise RuntimeError(glGetShaderInfoLog(fragShader))
 
@@ -952,7 +1467,7 @@ class ShaderProgram(object):
         """
 
         self.activateProgram()
-        glBindVertexArray(self.vaoHandle['meshVAO'])
+        glBindVertexArray(self.vaoHandle['meshVAO']) # TODO
 
         if self.uniformType[name] == 'matrix_4':
             glUniformMatrix4fv(self.uniformLoc[name], 1, True, value)
