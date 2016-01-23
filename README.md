@@ -18,6 +18,7 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
   * `pip install matplotlib` (Plotting utilities)
   * `pip install euclid` (concise 3D vector rotations)
   * `pip install plyfile` (read & write the `.ply` file format)
+     **Note:** On recent OSX machines, this may fail because System Integrity Protection makes it hard to upgrade numpy. In that case, try `pip install --ignore-installed plyfile`. 
   * `pip install pyopengl` (bindings for 3D graphics & windowing)
 
 3. Download the code in this repository. Either use the _Download Zip_ button on the [repository page](https://github.com/nmwsharp/DDGSpring2016), or (if you are familiar with git) clone the repository.
@@ -33,7 +34,7 @@ Unfortunately, like most programming tasks, this will be a little trickier in Wi
   * `pip install euclid` (concise 3D vector rotations)
   * `pip install plyfile` (read & write the `.ply` file format)
 
-3. The third package we need is called `pyopengl`, which contains bindings for 3D graphics and windowing. Unfortunately, there is an error involving the 64-bit version of `pyopengl` in the `pip` respository. If you are running 32-bit Windows (unlikely), you can just execute `pip install pyopengl` as above.
+3. The third package we need is called `pyopengl`, which contains bindings for 3D graphics and windowing. Unfortunately, there is an error involving the 64-bit version of `pyopengl` in the `pip` repository. If you are running 32-bit Windows (unlikely), you can just execute `pip install pyopengl` as above.
 
   If you are running 64-bit Windows (most likely), you will need to download a proper version of the package here http://www.lfd.uci.edu/~gohlke/pythonlibs/, you want the file called `PyOpenGL-3.1.1b1-cp27-none-win_amd64.whl`. Then navigate to the file in the command prompt and execute `pip install PyOpenGL-3.1.1b1-cp27-none-win_amd64.whl`. This will install the package directly with the fixed version you just downloaded.
 
@@ -48,7 +49,7 @@ Clearly, the code for this class is written in Python. Pure Python code is typic
 
 If you are unfamiliar with Python, don't be afraid! We will be doing everything possible to make this a painless experience. You might want to devote some time to basic tutorials on Python, but hopefully that will not be necessary. In this class you won't necessarily be creating complex programs from scratch -- just implementing algorithms.
 
-The [github wiki](https://github.com/nmwsharp/DDGSpring2016/wiki) contains (or will contain) some notes about Python as well as a series of examples demonstrating the usage of the language and this library.
+The [wiki](https://github.com/nmwsharp/DDGSpring2016/wiki) for this repository contains (or will contain) some notes about Python as well as a series of examples demonstrating the usage of the language and this library.
 
 
 ##Codebase Outline
