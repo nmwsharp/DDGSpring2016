@@ -384,32 +384,15 @@ class HalfEdgeMesh(object):
             for he in self.halfEdgesFull: he._cache.clear()
 
         # Update the static settings
-        for v in self.verts: v.staticGeometry = staticGeometry
+        for v in self.verts:
+            v.staticGeometry = staticGeometry
+            v._pos.flags.writeable = not staticGeometry
         for e in self.edges: e.staticGeometry = staticGeometry
         for f in self.facesFull: f.staticGeometry = staticGeometry
         for he in self.halfEdgesFull: he.staticGeometry = staticGeometry
 
         self._staticGeometry = staticGeometry
 
-    def enumerateVertices(self, subset=None):
-        """
-        Return a dictionary which assigns a 0-indexed integer to each vertex
-        in the mesh. If 'subset' is given (should be a set), only the vertices
-        in subset are indexed.
-        """
-        if subset is None:
-            subset = self.verts
-
-        enum = dict()
-        ind = 0
-        for vert in subset:
-            if vert not in self.verts:
-                raise ValueError("ERROR: enumerateVertices(subset) was called with a vertex in subset which is not in the mesh.")
-
-            enum[vert] = ind
-            ind += 1
-
-        return enum
 
 
     def assignReferenceDirections(self):
@@ -539,6 +522,30 @@ class HalfEdge(object):
         """The vector represented by this halfedge"""
         v = self.vertex.position - self.twin.vertex.position
         return v
+
+    @property
+    @cacheGeometry
+    def cotan(self):
+        """
+        Return the cotangent of the opposite angle, or 0 if this is an imaginary
+        halfedge
+        """
+        # Validate that this is on a triangle
+        if self.next.next.next is not self:
+            raise ValueError("ERROR: halfedge.cotan() is only well-defined on a triangle")
+
+        if self.isReal:
+
+            # Relevant vectors
+            A = -self.next.vector
+            B = self.next.next.vector
+
+            # Nifty vector equivalent of cot(theta)
+            val = np.dot(A,B) / norm(cross(A,B))
+            return val
+
+        else:
+            return 0.0
 
 
 class Vertex(object):
@@ -680,6 +687,18 @@ class Vertex(object):
         d = sum(1 for e in self.adjacentEdges())
         return d
 
+    @property
+    @cacheGeometry
+    def normal(self):
+        """The area-weighted normal vector for this vertex"""
+
+        normalSum = np.array([0.0,0.0,0.0])
+        for face in self.adjacentFaces():
+            normalSum += face.normal * face.area
+        n = normalize(normalSum)
+
+        return n
+
 class Face(object):
 
 
@@ -766,6 +785,27 @@ class Face(object):
             curr = curr.next
             if(curr == first):
                 break
+
+    @property
+    @cacheGeometry
+    def normal(self):
+        """The normal vector for this face"""
+
+        v = list(self.adjacentVerts())
+        n = normalize(cross(v[1].position - v[0].position, v[2].position - v[0].position))
+
+        return n
+
+
+    @property
+    @cacheGeometry
+    def area(self):
+        """The area of this face"""
+
+        v = list(self.adjacentVerts())
+        a = 0.5 * norm(cross(v[1].position - v[0].position, v[2].position - v[0].position))
+
+        return a
 
     @property
     @cacheGeometry

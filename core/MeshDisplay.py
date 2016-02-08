@@ -471,7 +471,7 @@ class MeshDisplay(object):
             self.pickInd[self.pickArray[i]] = i
 
         # Valid that we have enough indices to represent this
-        if len(self.pickArray) > self.PICK_IND_MAX**3:
+        if len(self.pickArray) >= self.PICK_IND_MAX**3:
             raise("ERROR: Do not have enough indices to support picking on a mesh this large. Pack floats better in picking code")
 
 
@@ -485,13 +485,14 @@ class MeshDisplay(object):
         ind -= self.PICK_IND_MAX * v2
         v3 = ind
 
-        return np.array([v1,v2,v3], dtype=np.float32)/256.0
+        return np.array([v1,v2,v3], dtype=np.float32)/float(self.PICK_IND_MAX)
 
     def pickResult(self, vals):
         """Return the object selected by a pick"""
-        ind1 = int(vals[0]*256.0)
-        ind2 = int(vals[1]*256.0)
-        ind3 = int(vals[2]*256.0)
+
+        ind1 = int(round(vals[0]*self.PICK_IND_MAX))
+        ind2 = int(round(vals[1]*self.PICK_IND_MAX))
+        ind3 = int(round(vals[2]*self.PICK_IND_MAX))
         ind = ind1*self.PICK_IND_MAX*self.PICK_IND_MAX + ind2*self.PICK_IND_MAX + ind3
 
         return self.pickArray[ind]
