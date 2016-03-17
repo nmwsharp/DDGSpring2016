@@ -5,6 +5,10 @@ from math import acos, pi
 from TriSoupMesh import TriSoupMesh
 from Utilities import *
 
+# Use euclid for rotations
+import euclid as eu
+
+
 # Iniialize the global counters for id numbers
 # NOTE: Global ID numbers mainly exist so that human debugging is easier
 # and doesn't require looking at memory addresses. If you want to use them for
@@ -355,7 +359,7 @@ class HalfEdgeMesh(object):
         print('    - Max vertex degree = ' + str(maxDegree))
         print('    - Min vertex degree = ' + str(minDegree))
 
-        nBoundaryVerts = sum([v.isBoundary() for v in self.verts])
+        nBoundaryVerts = sum([v.isBoundary for v in self.verts])
         print('    - n boundary verts = ' + str(nBoundaryVerts))
 
 
@@ -393,6 +397,45 @@ class HalfEdgeMesh(object):
 
         self._staticGeometry = staticGeometry
 
+
+    def enumerateVertices(self, subset=None):
+        """
+        Assign a unique index from 0 to (N-1) to each vertex in the mesh. Will
+        return a dictionary containing mappings {vertex ==> index}.
+        """
+        if subset is None:
+            subset = self.verts
+
+        enum = dict()
+        ind = 0
+        for vert in subset:
+            if vert not in self.verts:
+                raise ValueError("ERROR: enumerateVertices(subset) was called with a vertex in subset which is not in the mesh.")
+
+            enum[vert] = ind
+            ind += 1
+
+        return enum
+    
+    
+    def enumerateEdges(self):
+        """
+        Assign a unique index from 0 to (N-1) to each edge in the mesh.
+        """
+        d = dict()
+        for (i, edge) in enumerate(self.edges):
+            d[edge] = i
+        return d
+    
+    
+    def enumerateFaces(self):
+        """
+        Assign a unique index from 0 to (N-1) to each face in the mesh.
+        """
+        d = dict()
+        for (i, face) in enumerate(self.faces):
+            d[face] = i
+        return d
 
 
     def assignReferenceDirections(self):
@@ -513,6 +556,7 @@ class HalfEdge(object):
         return self.__str__()
 
     # Return a boolean indicating whether this is on the boundary of the mesh
+    @property
     def isBoundary(self):
         return not self.twin.isReal
 
@@ -663,6 +707,7 @@ class Vertex(object):
 
 
     # Return a boolean indicating whether this is on the boundary of the mesh
+    @property
     def isBoundary(self):
 
         # Traverse the halfedges adjacent to this, a loop of non-boundary halfedges
@@ -670,7 +715,7 @@ class Vertex(object):
         first = self.anyHalfEdge
         curr = self.anyHalfEdge
         while True:
-            if curr.isBoundary():
+            if curr.isBoundary:
                 return True
 
             curr = curr.twin.next
@@ -687,6 +732,8 @@ class Vertex(object):
         d = sum(1 for e in self.adjacentEdges())
         return d
 
+
+
     @property
     @cacheGeometry
     def normal(self):
@@ -698,6 +745,14 @@ class Vertex(object):
         n = normalize(normalSum)
 
         return n
+
+    def projectToTangentSpace(self, vec):
+        """
+        Projects a vector in R3 to a new vector in R3, guaranteed
+        to lie in the tangent plane of this vertex
+        """
+        return vec - self.normal * (dot(vec, self.normal))
+
 
 class Face(object):
 
@@ -726,12 +781,13 @@ class Face(object):
         return self.__str__()
 
     # Return a boolean indicating whether this is on the boundary of the mesh
+    @property
     def isBoundary(self):
 
         first = self.anyHalfEdge
         curr = self.anyHalfEdge
         while True:
-            if curr.isBoundary():
+            if curr.isBoundary:
                 return True
 
             curr = curr.next
@@ -820,6 +876,13 @@ class Face(object):
 
         return c
 
+    def projectToTangentSpace(self, vec):
+        """
+        Projects a vector in R3 to a new vector in R3, guaranteed
+        to lie in the tangent plane of this face
+        """
+        return vec - self.normal * (dot(vec, self.normal))
+
 class Edge(object):
 
 
@@ -844,15 +907,16 @@ class Edge(object):
         return self.__str__()
 
     # Return a boolean indicating whether this is on the boundary of the mesh
+    @property
     def isBoundary(self):
-        return self.anyHalfEdge.isBoundary()
+        return self.anyHalfEdge.isBoundary
 
     # Return true if the edge can be flipped, meaning:
     #   - The edge is not on the boundary
     #   - Neither of the verts that neighbor the edge has degree <= 3
     def canFlip(self):
 
-        if self.isBoundary():
+        if self.isBoundary:
             return False
 
         # Can only flip if both vertices have degree > 3
@@ -918,3 +982,20 @@ class Edge(object):
         # Verts
         Vold1.anyHalfEdge = h1n
         Vold2.anyHalfEdge = h2n
+    
+    
+    @property
+    @cacheGeometry
+    def cotanWeight(self):
+        """
+        Return the cotangent weight for an edge.
+        """
+        val = 0.0
+        if self.anyHalfEdge.isReal:
+            val += self.anyHalfEdge.cotan
+        if self.anyHalfEdge.twin.isReal:
+            val += self.anyHalfEdge.twin.cotan
+        val *= 0.5
+        return val
+
+

@@ -2,25 +2,32 @@
 
 # TODO check out this for drawing edges http://www2.imm.dtu.dk/pubdb/views/edoc_download.php/4884/pdf/imm4884.pdf
 
-# System imports
-import os
-from math import *
-import sys
-
-# Library imports
-import numpy as np
-import matplotlib.cm # used for colormaps
-import euclid as eu
+# OpenGL imports
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from OpenGL.GLUT import *
 
+# System imports
+import os
+from math import *
+import numpy as np
+import matplotlib.cm # used for colormaps
+from sys import platform
+import random
+
+# Our camera class encapsulating common camera transformations
+from Camera import Camera
+
 # Local imports
-from Utilities import normalize
+from Utilities import normalize, normalized
 from HalfEdgeMesh import HalfEdgeMesh, Face, Edge, Vertex, HalfEdge
 from TriSoupMesh import TriSoupMesh
 from Utilities import normalize, norm, cross
 from Camera import Camera
+from Streamlines import generateStreamlines
+
+# Use euclid for rotations
+import euclid as eu
 
 
 # TODO implement easier to use logic for when to update the data in buffers.
@@ -62,6 +69,7 @@ class MeshDisplay(object):
     colors = {
         'dark_grey':(0.15, 0.15, 0.15),
         'grey':(0.5, 0.5, 0.5),
+        'light_grey':(0.75, 0.75, 0.75),
         'black':(0.0,0.0,0.0),
         'almost_white':(0.95, 0.95, 0.95),
         'white': (1.0, 1.0, 1.0),
@@ -91,7 +99,8 @@ class MeshDisplay(object):
         self.drawShape = True
         self.drawEdges = False
         self.drawVertices = False
-        self.drawVectors = True
+        self.drawVectors = False
+        self.drawStreamlines = False
 
         if perfTarget not in ['nicest', 'fastest']:
             raise ValueError("perfTarget must be either 'nicest' or 'fastest'")
@@ -116,8 +125,8 @@ class MeshDisplay(object):
         self.edgePickProg = None
         self.vertPickProg = None
         self.vectorProg = None
+        self.streamlineProg = None
         self.camera = None
-        self.nShapeVerts = -1
 
         # Coloring options
         self.colorMethod = 'constant' # other possibilites: 'rgbData','scalarData'
@@ -140,10 +149,18 @@ class MeshDisplay(object):
         self.vectorIsTangent = False
         self.vectorIsUnit = False
         self.vectorRefDirAttrName = None
-        self.vectorNsym = 1            # symmetry order of the data to be drawn
+        self.vectorNsym = None            # symmetry order of the data to be drawn
         self.nVectorVerts = -1      # The size of the vertex buffer needed for
                                     #   specifying vector positions
         self.kVectorPrism = 8       # Number of sides to use when drawing the vectors
+        self.vectorScaleFactor = None
+        self.vectorArrowCache = dict() # Save buffers for vectors to avoid recalculating them
+
+        # Streamline drawing options
+        # (always uses the same vector field and other settings as vectorAttrName)
+        self.streamlinesEnabled = False
+        self.nStreamlineSegments = -1
+        self.streamlineCache = dict() # Save buffers for vectors to avoid recalculating them
 
         # Set window parameters
         self.windowTitle = windowTitle
@@ -268,7 +285,7 @@ class MeshDisplay(object):
 
         def drawMesh():
             glBindVertexArray(prog.vaoHandle['meshVAO'])
-            glDrawArrays(GL_TRIANGLES, 0, self.nShapeVerts)
+            glDrawArrays(GL_TRIANGLES, 0, 3*self.nFaces)
         prog.drawFunc = drawMesh
 
         if pick:
@@ -360,6 +377,19 @@ class MeshDisplay(object):
         self.meshPrograms.append(prog)
         self.vectorProg = prog
 
+    def prepareStreamlineProgram(self):
+        """Create an openGl program to draw streamlines"""
+        prog = self.preparePrettyShaderProgram()
+
+        def drawMesh():
+            glBindVertexArray(prog.vaoHandle['meshVAO'])
+            edgeArrLen = 6*self.nStreamlineSegments
+            glDrawArrays(GL_TRIANGLES, 0, edgeArrLen)
+        prog.drawFunc = drawMesh
+
+        self.meshPrograms.append(prog)
+        self.streamlineProg = prog
+
     def setMesh(self, mesh):
         """Set a mesh as the current mesh object to be drawn by this viewer"""
 
@@ -382,6 +412,11 @@ class MeshDisplay(object):
         # Initial camera distance
         self.camera.zoomDist = self.scaleFactor
 
+
+        # Clear caches
+        self.vectorArrowCache = dict()
+        self.streamlineCache = dict()
+
     def checkMesh(self):
         """
         Verify that the mesh has triangular faces and valid positions
@@ -397,7 +432,7 @@ class MeshDisplay(object):
         # Verify non-nan and non-inf positions
         for v in self.mesh.verts:
             if np.any(np.isnan(v.position)) or np.any(np.isinf(v.position)):
-                print("ERROR: Invalid position value at vertex {} = {}".format(str(v),str(v.position)))
+                print("ERROR: Invalid position value at vertex {} = {}".format(str(v),str(v.pos)))
                 raise ValueError("ERROR: Invalid (nan or inf) position value")
 
 
@@ -410,6 +445,10 @@ class MeshDisplay(object):
 
     def setShapeColorFromRGB(self, colorAttrName, definedOn='vertex'):
         """Sets the mesh face color from RGB data defined on the vertices"""
+
+        # Validate input
+        if definedOn not in ['face', 'vertex']:
+            raise ValueError("ERROR: definedOn must be one of [vertex, face]")
 
         self.colorMethod = 'rgbData'
         self.colorDefinedOn = definedOn
@@ -425,6 +464,11 @@ class MeshDisplay(object):
                       negative/positive data (classic blue/red)
         """
 
+        # Validate input
+        if definedOn not in ['face', 'vertex']:
+            raise ValueError("ERROR: definedOn must be one of [vertex, face]")
+
+        # Assign values
         self.colorMethod = 'scalarData'
         self.colorDefinedOn = definedOn
         self.colorAttrName = colorScalarAttr
@@ -433,9 +477,13 @@ class MeshDisplay(object):
 
 
     def setVectors(self, vectorAttrName, vectorDefinedAt='vertex', isTangentVector=False,
-                             vectorRefDirAttrName='referenceDirectionR3', isUnit=False, nSym=1):
+                             vectorRefDirAttrName='referenceDirectionR3', isUnit=False, nSym=1, scaleFactor=None):
         """Draws vectors on the surface of the mesh"""
         # TODO: Right now we can only draw one type of vector at a time
+
+        # Validate input
+        if vectorDefinedAt not in ['face', 'vertex']:
+            raise ValueError("ERROR: vectorDefinedAt must be one of [vertex, face]")
 
         if vectorAttrName is None:
             self.vectorAttrName = None
@@ -444,6 +492,7 @@ class MeshDisplay(object):
             self.vectorRefDirAttrName = None
             self.vectorIsUnit = None
             self.vectorNsym = 1
+            self.vectorScaleFactor = None
         else:
             self.vectorAttrName = vectorAttrName
             self.vectorDefinedAt = vectorDefinedAt
@@ -451,16 +500,12 @@ class MeshDisplay(object):
             self.vectorRefDirAttrName = vectorRefDirAttrName
             self.vectorIsUnit = isUnit
             self.vectorNsym = nSym
-
-            # Color face and vertex vectors different colors
-            if vectorDefinedAt == 'vertex':
-                self.vectorColor = np.array(self.colors['red'])
-            if vectorDefinedAt == 'face':
-                self.vectorColor = np.array(self.colors['light_blue'])
+            self.vectorScaleFactor = scaleFactor
 
             # Prepare a vector drawing program if we don't already have one
             if self.vectorProg is None:
                 self.prepareVectorProgram()
+
 
     def prepareToPick(self):
         """Sets up datastructures needed to pick from the current mesh"""
@@ -471,9 +516,8 @@ class MeshDisplay(object):
             self.pickInd[self.pickArray[i]] = i
 
         # Valid that we have enough indices to represent this
-        if len(self.pickArray) >= self.PICK_IND_MAX**3:
+        if len(self.pickArray) > self.PICK_IND_MAX**3:
             raise("ERROR: Do not have enough indices to support picking on a mesh this large. Pack floats better in picking code")
-
 
     def pickIndAsFloats(self, obj):
         """Return the pick index, represented as 3 floats for use as a color"""
@@ -507,6 +551,8 @@ class MeshDisplay(object):
         (You may NOT add/remove/modify verts/edges, and this may fail badly)
         """
 
+        print("Filling buffers for visualization")
+
         ## The data used to generate the image which actually appears onscreen
         self.generateFaceData()
         self.generateEdgeData()
@@ -515,11 +561,16 @@ class MeshDisplay(object):
         if self.vectorAttrName is not None:
             self.generateVectorData()
 
+        if self.streamlinesEnabled and self.vectorAttrName is not None:
+            self.generateStreamlines()
+
         ## Extra buffers/shaders used to support picking
         self.prepareToPick()
         self.generateFaceData(pick=True)
         self.generateEdgeData(pick=True)
         self.generateVertexData(pick=True)
+
+        print("Done filling buffers for visualization")
 
     def generateColorscale(self):
         """
@@ -627,11 +678,6 @@ class MeshDisplay(object):
                         raise NotImplementedError("Edge shape color definitions not implemented yet")
 
 
-        # Make edges face both ways
-        facePos, faceNorm, faceColor = self.expandTrianglesToFaceBothWays(facePos, faceNorm, faceColor)
-
-        self.nShapeVerts = facePos.shape[0]
-
         # Store this new data in the buffers
         if pick:
             glBindVertexArray(self.shapePickProg.vaoHandle['meshVAO'])
@@ -674,7 +720,7 @@ class MeshDisplay(object):
         if pick:
             # stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor, lineWidthCoef=3*self.lineWidthCoef)
             stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor,
-                                                lineWidth=3*self.lineWidthScaleCoef*self.medianEdgeLength, relativeWidths=False)
+                                                lineWidth=self.lineWidthScaleCoef*self.medianEdgeLength, relativeWidths=False)
         else:
             # stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor, lineWidthCoef=self.lineWidthCoef)
             stripPos, stripNorm, stripColor = self.expandLinesToStrips(edgePos, edgeNorm, edgeColor,
@@ -733,93 +779,105 @@ class MeshDisplay(object):
             self.vertProg.setVBOData('vertColor', diskColor)
 
 
-    def generateVectorData(self):
+    def generateVectorData(self, useCache=True):
         """Computes data for drawing vectors on the mesh, as instructed by setSurfaceDirections()"""
 
-        # Clear out if we're not currently looking at anything
-        if self.vectorAttrName is None:
-            self.nVectorVerts = 0
-            return
 
-        # Generate vector starts and ends for vectors in the tangent space
-        if self.vectorIsTangent:
+        # Generate new vector data
+        if not useCache or self.vectorAttrName not in self.vectorArrowCache:
 
-            # We only support vertex-defined directions here at the moment (TODO)
-            if not self.vectorDefinedAt == 'vertex':
-                raise ValueError("Vectors in the tangent space must be defined at vertices")
-            if not self.vectorIsUnit:
-                raise ValueError("Vectors in the tangent space must be interpreted as unit vectors")
+            # Generate vector starts and ends for vectors in the tangent space
+            if self.vectorIsTangent:
 
-            nSym = self.vectorNsym
-            nTotalVector = self.nVerts * nSym
-            vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
-            vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
+                # We only support vertex-defined directions here at the moment (TODO)
+                if not self.vectorDefinedAt == 'vertex':
+                    raise ValueError("Vectors in the tangent space must be defined at vertices")
+                if not self.vectorIsUnit:
+                    raise ValueError("Vectors in the tangent space must be interpreted as unit vectors")
 
-            # Compute a reasonable length for the direction vectors
-            # TODO make this vary by vertex
-            coef = 0.4 if nSym == 1 else 0.2 # lines should be shorter if we're drawing >1 per vertex
-            unitVectorLength = coef*self.medianEdgeLength
-
-            # Rotation increment for symmetric vectors
-            rotInc = 2.0 * pi / nSym
-
-            # Iterate over the vertices to fill the arrays
-            for (iVert, vert) in enumerate(self.mesh.verts):
-                for iRot in range(nSym):
-
-                    # The base point
-                    vecStart[(nSym*iVert + iRot),:] = vert.position
-
-                    # The draw-to point
-                    theta = getattr(vert, self.vectorAttrName)
-                    refDir = eu.Vector3(*getattr(vert, self.vectorRefDirAttrName))
-                    vecDir = np.array(refDir.rotate_around(eu.Vector3(*vert.normal), theta + rotInc * iRot), dtype=np.float32)
-                    vecEnd[(nSym*iVert + iRot),:] = vert.position + normalize(vecDir) * unitVectorLength
-
-        # Generate vectors in R3
-        else:
-
-            # Warn if you try to use nSym other than 1 for now
-            if self.vectorNsym != 1:
-                raise ValueError("Symmetry not yet supported for vectors in R3")
-
-            # Build an array from data stored on vertices
-            if self.vectorDefinedAt == 'vertex':
-                nTotalVector = self.nVerts
+                nSym = self.vectorNsym
+                nTotalVector = self.nVerts * nSym
                 vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
                 vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
 
+                # Compute a reasonable length for the direction vectors
+                # TODO make this vary by vertex
+                coef = 0.4 if nSym == 1 else 0.2 # lines should be shorter if we're drawing >1 per vertex
+                unitVectorLength = coef*self.medianEdgeLength
+
+                # Rotation increment for symmetric vectors
+                rotInc = 2.0 * pi / nSym
+
+                # Iterate over the vertices to fill the arrays
                 for (iVert, vert) in enumerate(self.mesh.verts):
-                    vecStart[iVert,:] = vert.position
-                    vecEnd[iVert,:] = vert.position + getattr(vert, self.vectorAttrName)
+                    for iRot in range(nSym):
 
-            # Build an array from data stored on faces
-            elif self.vectorDefinedAt == 'face':
-                nTotalVector = self.nFaces
-                vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
-                vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
+                        # The base point
+                        vecStart[(nSym*iVert + iRot),:] = vert.pos
 
-                for (iFace, face) in enumerate(self.mesh.faces):
-                    vecStart[iFace,:] = face.center
-                    vecEnd[iFace,:] = face.center + getattr(face, self.vectorAttrName)
+                        # The draw-to point
+                        theta = getattr(vert, self.vectorAttrName)
+                        refDir = eu.Vector3(*getattr(vert, self.vectorRefDirAttrName))
+                        vecDir = np.array(refDir.rotate_around(eu.Vector3(*vert.normal), theta + rotInc * iRot), dtype=np.float32)
+                        vecEnd[(nSym*iVert + iRot),:] = vert.pos + normalized(vecDir) * unitVectorLength
 
+            # Generate vectors in R3
             else:
-                print("ERROR: Unrecognized value for vectorDefinedAt: " + str(self.vectorDefinedAt))
-                print("       Should be one of 'vertex', 'face'")
-                raise ValueError("ERROR: Unrecognized value for vectorDefinedAt: " + str(self.vectorDefinedAt))
+
+                # Warn if you try to use nSym other than 1 for now
+                if self.vectorNsym != 1:
+                    raise ValueError("Symmetry not yet supported for vectors in R3")
+
+                # Build an array from data stored on vertices
+                if self.vectorDefinedAt == 'vertex':
+                    nTotalVector = self.nVerts
+                    vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
+                    vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
+
+                    for (iVert, vert) in enumerate(self.mesh.verts):
+                        vecStart[iVert,:] = vert.position
+                        vecEnd[iVert,:] = vert.position + getattr(vert, self.vectorAttrName)
+
+                # Build an array from data stored on faces
+                elif self.vectorDefinedAt == 'face':
+                    nTotalVector = self.nFaces
+                    vecStart = np.zeros((nTotalVector,3), dtype=np.float32)
+                    vecEnd = np.zeros((nTotalVector,3), dtype=np.float32)
+
+                    for (iFace, face) in enumerate(self.mesh.faces):
+                        vecStart[iFace,:] = face.center
+                        vecEnd[iFace,:] = face.center + getattr(face, self.vectorAttrName)
+
+                else:
+                    print("ERROR: Unrecognized value for vectorDefinedAt: " + str(self.vectorDefinedAt))
+                    print("       Should be one of 'vertex', 'face'")
+                    raise ValueError("ERROR: Unrecognized value for vectorDefinedAt: " + str(self.vectorDefinedAt))
 
 
-            # Rescale the vectors to a reasonable length
-            vec = vecEnd - vecStart
-            maxLen = np.max(norm(vec, axis=1))
-            vectorLen = 0.8 * self.medianEdgeLength
-            scaleFactor = vectorLen / maxLen
-            vecEnd = vecStart + (vecEnd - vecStart)*scaleFactor # kind of redundant way to do this...
+                # Rescale the vectors to a reasonable length
+                vec = vecEnd - vecStart
+                if self.vectorScaleFactor is None:
+                    maxLen = np.max(norm(vec, axis=1))
+                    vectorLen = 0.8 * self.medianEdgeLength
+                    scaleFactor = vectorLen / maxLen
+                else:
+                    scaleFactor = self.vectorScaleFactor
+                vecEnd = vecStart + (vecEnd - vecStart)*scaleFactor # kind of redundant way to do this...
 
 
-        # Expand the vectors in to prisms that look nice
-        coef = 0.8 if self.vectorIsTangent else 0.8
-        vertVecPos, vertVecNorm, vertVecColor = self.expandVectors(vecStart, vecEnd, coef*self.lineWidthScaleCoef*self.medianEdgeLength)
+            # Expand the vectors in to prisms that look nice
+            coef = 0.8 if self.vectorIsTangent else 0.8
+            vertVecPos, vertVecNorm, vertVecColor = self.expandVectors(vecStart, vecEnd, coef*self.lineWidthScaleCoef*self.medianEdgeLength)
+
+
+            # Store these pretty vectors in the cache
+            self.vectorArrowCache[self.vectorAttrName] = (vertVecPos, vertVecNorm, vertVecColor)
+
+
+        # Read the vectors from the cache
+        else:
+            vertVecPos, vertVecNorm, vertVecColor = self.vectorArrowCache[self.vectorAttrName]
+
 
         # Size of the ultimate buffer containing this vector data
         self.nVectorVerts = vertVecPos.shape[0]
@@ -854,11 +912,11 @@ class MeshDisplay(object):
         if relativeWidths:
             # The widths for each line are a factor of the lenght the line
             lineWidth = 0.1 * norm(forwardVec, axis=1)
-            crossI = (normalize(crossI).T*lineWidth/2.0).T
-            crossJ = (normalize(crossJ).T*lineWidth/2.0).T
+            crossI = (normalized(crossI).T*lineWidth/2.0).T
+            crossJ = (normalized(crossJ).T*lineWidth/2.0).T
         else:
-            crossI = normalize(crossI)*lineWidth/2.0
-            crossJ = normalize(crossJ)*lineWidth/2.0
+            crossI = normalized(crossI)*lineWidth/2.0
+            crossJ = normalized(crossJ)*lineWidth/2.0
 
         # Generate the 4 points which will make up triangles for each line
         v0 = linePos[0:2*nLines:2,:] + crossI
@@ -915,8 +973,8 @@ class MeshDisplay(object):
         randDir = (2*np.random.rand(3) - np.array([1.0,1.0,1.0])).astype(np.float32)
 
         # Generate basis vectors at each vertex
-        xDir = normalize(np.cross(dotNorm, randDir))*dotRad
-        yDir = normalize(np.cross(dotNorm, xDir))*dotRad
+        xDir = normalized(np.cross(dotNorm, randDir))*dotRad
+        yDir = normalized(np.cross(dotNorm, xDir))*dotRad
 
         # Walk around a circle placing the points that make up each triangle
         for rotInc in range(nRad):
@@ -959,13 +1017,7 @@ class MeshDisplay(object):
         triPosRev[1:triPosRev.shape[0]:3,:] = triPos[0:triPos.shape[0]:3,:]
         triPosRev[2:triPosRev.shape[0]:3,:] = triPos[2:triPos.shape[0]:3,:]
         doubleTriPos = np.vstack((triPos, triPosRev))
-
-        triNormRev = np.zeros_like(triNorm)
-        triNormRev[0:triNormRev.shape[0]:3,:] = triNorm[1:triNorm.shape[0]:3,:]
-        triNormRev[1:triNormRev.shape[0]:3,:] = triNorm[0:triNorm.shape[0]:3,:]
-        triNormRev[2:triNormRev.shape[0]:3,:] = triNorm[2:triNorm.shape[0]:3,:]
-        doubleTriNorm = np.vstack((triNorm, -triNormRev))
-
+        doubleTriNorm = np.vstack((triNorm, np.zeros_like(triNorm)))
         doubleTriColor = np.vstack((triColor, triColor))
 
         return doubleTriPos, doubleTriNorm, doubleTriColor
@@ -998,9 +1050,9 @@ class MeshDisplay(object):
         randDir = (2*np.random.rand(3) - np.array([1.0,1.0,1.0])).astype(np.float32)
 
         # Generate basis vectors at each vector base
-        vecs = normalize(vecEnds - vecStarts)
-        xDir = normalize(np.cross(vecs, randDir))
-        yDir = normalize(np.cross(vecs, xDir))
+        vecs = normalized(vecEnds - vecStarts)
+        xDir = normalized(np.cross(vecs, randDir))
+        yDir = normalized(np.cross(vecs, xDir))
 
         if drawTips:
             tipHeight = 2.5 * vectorRadius
@@ -1073,6 +1125,103 @@ class MeshDisplay(object):
 
         return stripPos, stripNorm, stripColor
 
+
+    def enableStreamlines(self):
+        """
+        Draw pretty streamlines on the mesh corresponding to the current vector field
+        """
+        self.streamlinesEnabled = True
+        self.drawStreamlines = True
+        self.drawVectors = False
+        self.shapeColor = np.array(self.colors['light_grey'])
+            
+        # Prepare a streamline drawing program if we don't already have one
+        if self.streamlineProg is None:
+            self.prepareStreamlineProgram()
+
+
+    def generateStreamlines(self, useCache=True, colormap='Spectral'):
+        """
+        Trace streamlines over the mesh.
+
+          -If useCache=True, cached values will be used if available
+          -'colormap' is a string with the name a matplotlib colormap to sample colors from
+
+        """
+
+        # TODO There's no real reason for this function to read from state rather than recalculating... maybe worth a refactor
+
+        # Make sure there's actually a vector field defined
+        if self.vectorAttrName is None:
+            raise ValueError("ERROR: Cannot generate streamlines without a vector field specified.")
+        
+
+        # Compute new lines
+        if not useCache or self.vectorAttrName not in self.streamlineCache:
+            
+            # Parameters
+            nLines = len(self.mesh.faces) * self.vectorNsym / 5
+            # nLines = len(self.mesh.faces)
+            lineLength = 15 * self.medianEdgeLength
+            # colorPalette = matplotlib.cm.get_cmap('Set1')
+            # colorPalette = matplotlib.cm.get_cmap('Paired')
+            # colorPalette = matplotlib.cm.get_cmap('Spectral')
+            colorPalette = matplotlib.cm.get_cmap(colormap)
+
+
+            # Get a whole bunch of lines
+            rawLines = generateStreamlines(self.mesh, nLines, lineLength, self.vectorAttrName, includeNormals=True, countMax=12,
+                            definedOn=self.vectorDefinedAt, isTangentVector=self.vectorIsTangent, nSym=self.vectorNsym)
+
+            # Expand the raw lines into pairs of points (representing segments)
+            nSegments = 0
+            for line,normals in rawLines:
+                nSegments += len(line) - 1
+
+            linesArr = np.zeros((2*nSegments, 3), dtype=np.float32)
+            normalsArr = np.zeros((2*nSegments, 3), dtype=np.float32)
+            colorsArr = np.zeros((2*nSegments, 3), dtype=np.float32)
+
+            # Copy the data and give the line colors
+            arrInd = 0
+            for line,normals in rawLines:
+
+                color = np.array(colorPalette(random.random())[0:3], dtype=np.float32)
+
+                # to reduce z-fighting, normal-offset each line by a randomized amount
+                myOffset = random.random() * 0.001 * self.scaleFactor
+
+                # Copy the line in to a series of segments with normals and colors
+                for i in range(len(line)-1):
+                    linesArr[arrInd,:] = line[i] + myOffset*normals[i]
+                    normalsArr[arrInd,:] = normals[i]
+                    colorsArr[arrInd,:] = color
+                    linesArr[arrInd+1,:] = line[i+1] + myOffset*normals[i+1]
+                    normalsArr[arrInd+1,:] = normals[i+1]
+                    colorsArr[arrInd+1,:] = color
+                    arrInd += 2
+
+
+            # Expand the lines in to strips
+            stripPos, stripNorm, stripColor = self.expandLinesToStrips(linesArr, normalsArr, colorsArr,
+                                                lineWidth=1.0*self.lineWidthScaleCoef*self.medianEdgeLength, relativeWidths=False)
+
+            # Save these values in the cache
+            self.streamlineCache[self.vectorAttrName] = (stripPos, stripNorm, stripColor, nSegments)
+
+        # Use saved values
+        else:
+            stripPos, stripNorm, stripColor, nSegments = self.streamlineCache[self.vectorAttrName]
+
+
+        # Store the data in the buffers for the streamline program
+        self.nStreamlineSegments = nSegments
+        glBindVertexArray(self.streamlineProg.vaoHandle['meshVAO'])
+        self.streamlineProg.setVBOData('vertPos', stripPos)
+        self.streamlineProg.setVBOData('vertNorm', stripNorm)
+        self.streamlineProg.setVBOData('vertColor', stripColor)
+
+
     def computeScale(self):
         """
         Compute scale factors and translations so that we get a good default view
@@ -1099,8 +1248,7 @@ class MeshDisplay(object):
 
         # Compute the median edge length
         lengths = sorted([norm(e.anyHalfEdge.vector) for e in self.mesh.edges])
-        self.medianEdgeLength = lengths[(len(lengths)*9)/10]
-
+        self.medianEdgeLength = lengths[(len(lengths)*9)/10] #TODO not actually median...
 
 
     def redraw(self):
@@ -1156,7 +1304,8 @@ class MeshDisplay(object):
         self.vertPickProg.setUniform('depthOffset', 0.0005 * self.scaleFactor)
         if self.vectorProg is not None:
             self.vectorProg.setUniform('depthOffset', 0.0003 * self.scaleFactor)
-
+        if self.streamlineProg is not None:
+            self.streamlineProg.setUniform('depthOffset', 0.0005 * self.scaleFactor)
 
         # Draw the mesh
         if self.drawEdges:
@@ -1167,6 +1316,8 @@ class MeshDisplay(object):
             self.vectorProg.draw()
         if self.drawVertices:
             self.vertProg.draw()
+        if self.streamlinesEnabled and self.drawStreamlines and self.vectorAttrName is not None:
+            self.streamlineProg.draw()
 
         ## Uncomment to draw the pick buffer for debugging
         # glClearColor(*(np.append(self.colors['black'],[0.0])).astype(np.float32))
@@ -1206,9 +1357,6 @@ class MeshDisplay(object):
         # Read the value of the pixel at the pick location and look up the object
         res = glReadPixelsf(bufferX, bufferY, 1, 1, GL_RGB)[0,0]
         pickObject = self.pickResult(res)
-
-        if pickObject is None:
-            return
 
         ## Take action on the pick
         print("\nPick: " + str(pickObject))
@@ -1252,18 +1400,18 @@ class MeshDisplay(object):
         glutInit()
 
         # Switch statements are definitely platform independent
-        print("  Platform is: " + sys.platform)
-        if sys.platform == "linux" or sys.platform == "linux2":
+        print("  Platform is: " + platform)
+        if platform == "linux" or platform == "linux2":
             # linux
             glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH | GLUT_3_2_CORE_PROFILE)
-        elif sys.platform == "darwin":
+        elif platform == "darwin":
             # OS X
             glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH | GLUT_3_2_CORE_PROFILE)
-        elif sys.platform == "win32":
+        elif platform == "win32":
             # Windows...
             glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH)
         else:
-            raise OSError("Unrecognized platform: " + str(sys.platform))
+            raise OSError("Unrecognized platform: " + str(platform))
 
         glutInitWindowSize(self.windowWidth, self.windowHeight)
         glutInitWindowPosition(200, 200)
@@ -1311,8 +1459,10 @@ class MeshDisplay(object):
         glutPostRedisplay()
 
     def keyfunc(self, key, x, y):
-        """Keyboard callback"""
-        if key == chr(27) or key == 'q': # escape key
+        """Process a keyboard callback"""
+
+        # Change viewer settings
+        if key == chr(27): # escape key
             exit(0)
         if key == 'm':
             self.drawEdges = not self.drawEdges
@@ -1322,10 +1472,16 @@ class MeshDisplay(object):
             self.drawVectors = not self.drawVectors
         elif key == 'n':
             self.drawVertices = not self.drawVertices
+        elif key == 'p':
+            self.drawStreamlines = not self.drawStreamlines
         elif key == 'h':
             self.printKeyCallbacks()
+
+        # User callbacks
         elif key in self.userKeyCallbacks:
             self.userKeyCallbacks[key][0]()
+
+        # Camera control
         else:
             # Pass it on to the camera to see if the camera wants to do something
             # with it
@@ -1342,7 +1498,7 @@ class MeshDisplay(object):
         so there is no need to trigger one within your callback function.
         """
 
-        reservedKey = [chr(27),'m','k','h','r','f','w','a','s','d','l','n']
+        reservedKey = [chr(27),'m','k','h','r','f','w','a','s','d','l','n', 'p']
         if(key in reservedKey):
             raise ValueError("ERROR: Cannot register key callback for " + key + ", key is reserved for the viewer application")
 
@@ -1353,7 +1509,7 @@ class MeshDisplay(object):
 
         print("\n\n==== Keyboard controls ====\n")
         print("== Viewer commands")
-        print("esc/q ----  Exit the viewer")
+        print("esc   ----  Exit the viewer")
         print("wasd  ----  Pan the current view (also shift-mousedrag)")
         print("r     ----  Zoom the view in")
         print("f     ----  Zoom the view out")
@@ -1362,6 +1518,7 @@ class MeshDisplay(object):
         print("k     ----  Toggle drawing the faces of the mesh")
         print("n     ----  Toggle drawing the vertices of the mesh")
         print("l     ----  Toggle drawing the vector data on the mesh surface (if set)")
+        print("p     ----  Toggle drawing streamlines on the mesh surface (if set)")
 
         if len(self.userKeyCallbacks) > 0:
             print("\n== Application commands")
@@ -1369,6 +1526,163 @@ class MeshDisplay(object):
                 print(key+"     ----  "+self.userKeyCallbacks[key][1])
 
         print("\n")
+
+
+    def registerColorToggleCallbacks(self, colorList):
+        """
+        Helper function for creating a series of callbacks which toggle
+        between color visualizations
+
+        colorList is a list of the color elements to be used, where each element
+        of the list is a dictionary with the args to a setShapeColorFromScalar()
+        call. The attribute name should be given with the key 'colorScalarAttr'. Two
+        additional keys should specify the keypress ('key') and a docstring ('docstring').
+
+        If an entry is given which has 'colorScalarAttr' => None, a callback will be created
+        to clear the color.
+        """
+
+        for entry in colorList:
+
+            if entry['colorScalarAttr'] is None:
+                keyPress = entry['key']
+                docstring = entry['docstring']
+
+                def callback():
+                    print("Showing color data: None")
+                    self.setShapeColorToDefault()
+                    self.generateFaceData()
+
+                self.registerKeyCallback(keyPress, callback, docstring)
+
+
+            else:
+
+                # Create a subdictionary
+                attrName = entry['colorScalarAttr']
+                keyPress = entry['key']
+                docstring = entry['docstring']
+                del entry['colorScalarAttr']
+                del entry['key']
+                del entry['docstring']
+
+                def callback(entry=entry, attrName=attrName): # the keyword args cause the names to resolve at define-time rather than lazily
+                    print("Showing color data: " + attrName)
+                    self.setShapeColorFromScalar(attrName, **entry)
+                    self.generateFaceData()
+
+                self.registerKeyCallback(keyPress, callback, docstring)
+    
+    
+    def registerVectorToggleCallbacks(self, vectorList, enableStreamlines=True):
+        """
+        Helper function for creating a series of callbacks which toggle
+        between vector visualizations.
+
+        vectorList is a list of the vector elements to be used, where each element
+        of the list is a dictionary with the args to a setVectors() call.
+        The attribute name should be given with the key 'vectorAttr'. Two
+        additional keys should specify the keypress ('key') and a docstring ('docstring').
+        A 'colormap' key sets the colormap for the streamlines.
+
+        If an entry is given which has 'vectorAttr' => None, a callback will be created
+        to clear the vector.
+
+        As usual, the 'l' and 'p' keys will toggle vector visualization and streamline visualization,
+        respectively. Streamlines only work if the option enableStreamlines=True is set.
+        """
+   
+
+        # Issue: If we just use the setVectors() function the obvious way, each individual vector field
+        #        will get a scale factor computed look nice on the mesh. However, if these scale factors
+        #        are not all the same, the distinct fields cannot be compared (as the user would probably
+        #        expect).
+        #
+        # Solution: Pre-compute a reasonable scale factor for all the fields, and manually pass it in.
+        #    -> Sub issue: This breaks the abstraction that visualization can be set before the mesh...
+        #                  Why do I have that abstraction anyway...? Oh well.
+        # TODO Check that mesh is set and relevant properties are defined to error out intelligently
+        
+        # Compute a scale to be used for all non-unit vectors
+        scaleFactor = None
+        for entry in vectorList:
+            if entry['vectorAttr'] is None or entry.get('isUnit',False): continue
+
+            # Make sure we have a scale
+            if self.medianEdgeLength == -1:
+                self.computeScale()
+
+            # Find the longest vector in this field
+            maxLen = 0.0
+            if 'vectorDefinedAt' not in entry or entry['vectorDefinedAt'] == 'vertex':
+                for vert in self.mesh.verts:
+                    maxLen = max((maxLen, norm(getattr(vert, entry['vectorAttr']))))
+            elif entry['vectorDefinedAt'] == 'face':
+                for face in self.mesh.faces:
+                    maxLen = max((maxLen, norm(getattr(face, entry['vectorAttr']))))
+            
+            thisScale = 0.8 * self.medianEdgeLength / maxLen
+            if scaleFactor is None or thisScale < scaleFactor:
+                scaleFactor = thisScale
+
+        # Add the scale factor (which my be None) to each entry
+        for entry in vectorList:
+            entry['scaleFactor'] = scaleFactor
+
+
+
+        # Make sure streamlines are enabled
+        if enableStreamlines:
+            self.enableStreamlines()
+
+
+        # Create a callback for each vector field
+        for entry in vectorList:
+
+            if entry['vectorAttr'] is None:
+                keyPress = entry['key']
+                docstring = entry.get('docstring','Show no vector field')
+
+                def callback():
+                    print("Showing vector data: None")
+                    self.setVectors(None)
+                    self.generateVectorData()
+                    if enableStreamlines:
+                        self.generateStreamlines()
+
+                self.registerKeyCallback(keyPress, callback, docstring)
+
+
+            else:
+
+                # Create a subdictionary
+                attrName = entry.pop('vectorAttr')
+                keyPress = entry.pop('key')
+                docstring = entry.pop('docstring',"Show vector field '" + attrName + "'")
+                colormap = entry.pop('colormap','Spectral')
+                
+
+                def callback(entry=entry, attrName=attrName, colormap=colormap): # the keyword args cause the names to resolve at define-time rather than lazily
+                    print("Showing vector data: " + attrName)
+                    self.setVectors(attrName, **entry)
+                    self.generateVectorData()
+                    if enableStreamlines:
+                        self.generateStreamlines(colormap=colormap)
+
+                # If we already have a mesh, call the generate() function now to populate the caches at setup rather than runtime
+                if self.mesh is not None:
+                    print("Generating vector data for " + attrName)
+                    self.setVectors(attrName, **entry)
+                    self.generateVectorData()
+                    if enableStreamlines:
+                        self.generateStreamlines(colormap=colormap)
+
+
+                self.registerKeyCallback(keyPress, callback, docstring)
+
+        # Make sure nothing is 'turned on' when the function exits (might have leftovers from filling caches)
+        self.setVectors(None)
+
 
     def motionfunc(self, x, y):
         """Mouse-move callback"""

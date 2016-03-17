@@ -111,6 +111,13 @@ def cross(u, v):
 def dot(u,v):
     return np.dot(u,v)
 
+def clamp(val, lower = -float('inf'), upper = float('inf')):
+    if val > upper:
+        val = upper
+    if val < lower:
+        val = lower
+    return val
+
 def regAngle(theta):
     """
     Returns the argument mapped in to (-pi,pi]
