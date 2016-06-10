@@ -9,7 +9,7 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
 ##Getting started (OSX and Linux)
 
 1. Make sure you have an installation of Python 2.7, including the `pip` package manager.
-  * **Mac** On recent OSX versions, Python is installed by default, and you may already have `pip` as well. Executing `sudo easy_install pip` in a terminal should install `pip` if not.
+  * **Mac** On recent OSX versions, Python is installed by default, and you may already have `pip` as well. Executing `sudo easy_install pip` in a terminal should install `pip` if not.  Note that you may have to run `python2.7` from the command line, as just plain `python` may run a different version.
   * **Linux** Get Python and `pip` from your package manager, if you don't already have them. On Ubuntu, try `sudo apt-get install python-pip`. To satisfy some other requirements below as well, try `sudo apt-get install python-numpy python-scipy python-matplotlib`.
 
 2. Install dependencies using `pip`. Execute these commands at the terminal (you may need to preface them with `sudo`).
@@ -23,7 +23,7 @@ Welcome to the code repository for 15-869 Discrete Differential Geometry at CMU 
 
 3. Download the code in this repository. Either use the _Download Zip_ button on the [repository page](https://github.com/nmwsharp/DDGSpring2016), or (if you are familiar with git) clone the repository.
 
-4. To verify the code works, open a terminal in the Assignment0 directory, and execute `python testview.py ../meshes/bunny.obj`. You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing a future assignment it will look much nicer.
+4. To verify the code works, open a terminal in the Assignment0 directory, and execute `python testview.py ../meshes/bunny.obj` (on some systems, you may have to use `python2.7` rather than just `python`). You should get a window with bunny in it! Try clicking and dragging around in the window. For now the bunny will just look like a silhouette, after completing a future assignment it will look much nicer.
 
 ##Getting started (Windows)
 Unfortunately, like most programming tasks, this will be a little trickier in Windows.
